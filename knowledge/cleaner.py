@@ -36,6 +36,10 @@ PATH_DOMAIN_HINTS = [
     ("policies/finance", "finance"),
     ("policies/salary_performance", "salary_performance"),
     ("policies/warehouse", "procurement"),
+    ("policies/production", "production"),
+    ("policies/quality", "quality"),
+    ("policies/research", "research"),
+    ("policies/it_service", "it_service"),
     ("policies/sales", "ticket_sop"),
     ("policies/hr", "onboarding"),
 ]
