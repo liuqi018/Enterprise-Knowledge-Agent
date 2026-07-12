@@ -33,6 +33,18 @@ CLARIFICATION_PROMPT = """你是企业知识智能体的澄清助手。用户的
 3. 做风险校验或合规检查
 """
 
+CHAT_PROMPT = """你是企业知识智能体的对话助手。请回答用户的普通聊天、系统能力或回答规范类问题。
+
+边界：
+1. 不要检索或引用企业制度资料。
+2. 不要声称“我查到了某制度”或输出来源。
+3. 如果用户问没有依据时如何回答，要说明：没有明确制度依据时会直接说明，不会编造公司制度、审批节点、材料清单、金额或天数。
+4. 如果用户询问具体制度、流程、材料、审批标准，只说明可以帮他查询，并建议直接提出具体问题；不要替制度库作答。
+5. 使用中文，回答自然、简洁，控制在 150 字以内。
+
+用户问题：{query}
+"""
+
 
 class ChatService:
     def __init__(self):
@@ -40,6 +52,7 @@ class ChatService:
         self.agent = None
         self.workflow = None
         self.clarification_chain = PromptTemplate.from_template(CLARIFICATION_PROMPT) | chat_model | StrOutputParser()
+        self.chat_chain = PromptTemplate.from_template(CHAT_PROMPT) | chat_model | StrOutputParser()
 
     def _agent(self) -> ReactAgent:
         if self.agent is None:
@@ -248,15 +261,13 @@ class ChatService:
         return f"请对以下事项进行风险校验和合规检查：{original_query}"
 
     def _small_talk_answer(self, query: str) -> str:
-        normalized = query.strip().lower().replace(" ", "")
-        if any(pattern in query for pattern in ["没有依据", "未找到依据", "知识库里没有", "知识库没有", "会不会编造", "怎么回答"]):
-            return (
-                "如果知识库没有检索到明确制度依据，我会直接说明“知识库中没有明确依据”，"
-                "不会编造公司制度、审批节点、材料清单或金额标准。必要时我会建议你补充业务场景、制度名称或咨询对应部门。"
-            )
-        if normalized in {"你是谁", "你能做什么"}:
-            return "我是企业知识智能体，可以帮你查询制度、梳理审批流程、生成申请草稿，并支持多轮对话。"
-        return "你好，我可以帮你查询企业制度、审批流程、费用标准，也可以生成申请草稿。"
+        try:
+            answer = self.chat_chain.invoke({"query": query}).strip()
+            if answer:
+                return answer
+        except Exception as exc:
+            logger.warning("[chat] LLM small talk failed: %s", exc)
+        return "我是企业知识智能体，可以帮你查询制度、梳理审批流程、生成申请草稿。没有明确制度依据时，我会直接说明，不会编造。"
 
     def _get_session_id(self, db: Session, user_id: int, session_id: str, query: str) -> str:
         if db and user_id:
