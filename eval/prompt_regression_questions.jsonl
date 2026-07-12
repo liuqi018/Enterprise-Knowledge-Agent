@@ -1,0 +1,7 @@
+{"id":"onboarding_materials","query":"新员工入职需要准备哪些材料？","expected_route":"professional_policy","expected_behavior":"回答入职材料清单，引用入职相关制度来源。"}
+{"id":"leave_process","query":"我想在工作日请一天事假，应该走什么流程？","expected_route":"professional_policy","expected_behavior":"回答请假申请流程，材料或审批不明确时标注资料未明确。"}
+{"id":"procurement_approval","query":"采购金额超过5万元时，需要经过哪些审批？","expected_route":"professional_policy","expected_behavior":"回答采购审批节点和金额条件，引用采购制度来源。"}
+{"id":"meta_no_basis","query":"如果知识库里没有相关制度依据，你会怎么回答？","expected_route":"chat","expected_behavior":"说明不会编造，会明确回答知识库中没有明确依据，不应触发 RAG 检索。"}
+{"id":"hallucination_guard","query":"公司有没有远程办公补贴制度？","expected_route":"direct_policy","expected_behavior":"如果资料没有直接依据，应回答知识库中没有明确依据，不要编造补贴标准。"}
+{"id":"ambiguous_intent","query":"我想申请采购电脑","expected_route":"complex_process","expected_behavior":"生成申请草稿或流程方案前应基于制度检索，资料不足时不补造审批链。"}
+{"id":"small_talk","query":"你能做什么？","expected_route":"chat","expected_behavior":"说明系统能力，不触发制度检索。"}

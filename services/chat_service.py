@@ -249,6 +249,11 @@ class ChatService:
 
     def _small_talk_answer(self, query: str) -> str:
         normalized = query.strip().lower().replace(" ", "")
+        if any(pattern in query for pattern in ["没有依据", "未找到依据", "知识库里没有", "知识库没有", "会不会编造", "怎么回答"]):
+            return (
+                "如果知识库没有检索到明确制度依据，我会直接说明“知识库中没有明确依据”，"
+                "不会编造公司制度、审批节点、材料清单或金额标准。必要时我会建议你补充业务场景、制度名称或咨询对应部门。"
+            )
         if normalized in {"你是谁", "你能做什么"}:
             return "我是企业知识智能体，可以帮你查询制度、梳理审批流程、生成申请草稿，并支持多轮对话。"
         return "你好，我可以帮你查询企业制度、审批流程、费用标准，也可以生成申请草稿。"
