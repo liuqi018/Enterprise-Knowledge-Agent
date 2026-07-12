@@ -17,6 +17,29 @@ SIGNATURE_TERMS = ["签字", "签名", "盖章", "审批意见", "审核意见",
 
 FORM_FIELD_TERMS = ["序号", "名称", "规格", "型号", "数量", "单价", "金额", "备注", "部门", "申请人"]
 
+PATH_DOCUMENT_TYPE_HINTS = [
+    ("templates/contracts", "contract_template"),
+    ("templates/forms", "form_template"),
+    ("references/job_descriptions", "job_description"),
+    ("references/training_materials", "training_material"),
+    ("references/org_structure", "job_description"),
+    ("policies/", "policy"),
+]
+
+PATH_DOMAIN_HINTS = [
+    ("policies/procurement", "procurement"),
+    ("policies/leave_attendance", "leave_attendance"),
+    ("policies/onboarding", "onboarding"),
+    ("policies/reimbursement", "reimbursement"),
+    ("policies/security", "security"),
+    ("policies/administration", "administration"),
+    ("policies/finance", "finance"),
+    ("policies/salary_performance", "salary_performance"),
+    ("policies/warehouse", "procurement"),
+    ("policies/sales", "ticket_sop"),
+    ("policies/hr", "onboarding"),
+]
+
 
 def clean_text(text: str) -> str:
     text = normalize_whitespace(text)
@@ -75,6 +98,10 @@ def is_repeated_punctuation(line: str) -> bool:
 
 
 def infer_document_type(path: str, content: str = "") -> str:
+    path_hint = infer_document_type_from_path(path)
+    if path_hint:
+        return path_hint
+
     name = os.path.basename(path)
     text = f"{name} {content[:800]}"
     if any(term in name for term in ["合同", "协议", "承诺书"]) and "制度" not in name:
@@ -91,6 +118,10 @@ def infer_document_type(path: str, content: str = "") -> str:
 
 
 def infer_policy_domain(path: str, content: str = "") -> str:
+    path_hint = infer_policy_domain_from_path(path)
+    if path_hint:
+        return path_hint
+
     name = os.path.basename(path)
     document_type = infer_document_type(path, content)
     text = f"{name} {content[:1000]}"
@@ -111,6 +142,26 @@ def infer_policy_domain(path: str, content: str = "") -> str:
         if any(keyword in text for keyword in keywords):
             return domain
     return "general"
+
+
+def normalize_path_hint(path: str) -> str:
+    return path.replace("\\", "/").lower()
+
+
+def infer_document_type_from_path(path: str) -> str:
+    normalized = normalize_path_hint(path)
+    for folder, document_type in PATH_DOCUMENT_TYPE_HINTS:
+        if folder in normalized:
+            return document_type
+    return ""
+
+
+def infer_policy_domain_from_path(path: str) -> str:
+    normalized = normalize_path_hint(path)
+    for folder, domain in PATH_DOMAIN_HINTS:
+        if folder in normalized:
+            return domain
+    return ""
 
 
 def is_low_value_chunk(text: str, metadata: dict = None) -> bool:
