@@ -225,6 +225,7 @@ class RagSummarizeService:
 
         fused = self.weighted_reciprocal_rank_fusion(recalled_lists)
         filtered = self.light_filter(query, fused)
+        filtered = self.strict_domain_filter(query, filtered, metadata_filter)
         filtered = self.domain_aware_rerank(query, filtered)
         if intent == "complex_process" and settings.ENABLE_COMPLEX_RERANK and settings.RERANK_PROVIDER != "none":
             selected = self.rerank(query, filtered)
@@ -476,6 +477,47 @@ class RagSummarizeService:
         kept = [doc for doc in documents if keep(doc)]
         return kept[: settings.LIGHT_FILTER_TOP_N]
 
+    def strict_domain_filter(
+        self,
+        query: str,
+        documents: List[Document],
+        metadata_filter: Optional[Dict[str, str]],
+    ) -> List[Document]:
+        if not metadata_filter or metadata_filter.get("policy_domain") != "procurement":
+            return documents
+
+        strict = [doc for doc in documents if self.is_procurement_relevant(query, doc)]
+        if strict:
+            return strict
+        return documents
+
+    def is_procurement_relevant(self, query: str, doc: Document) -> bool:
+        metadata = doc.metadata or {}
+        file_name = str(metadata.get("file_name") or metadata.get("source") or "")
+        section = str(metadata.get("section_title") or "")
+        content = doc.page_content or ""
+        combined = f"{file_name} {section} {content[:800]}"
+
+        procurement_terms = ["采购", "请购", "供应商", "询价", "报价", "验收", "物资", "办公用品", "仓库"]
+        approval_terms = ["审批", "批准", "审核", "总经理", "副总", "财务总监", "部门经理", "分管领导", "核准", "请购单"]
+        amount_terms = ["金额", "万元", "5万", "五万", "50000", "5000", "超过", "以上", "固定资产", "低值易耗品"]
+        polluted_file_terms = ["岗位职责", "销售管理", "合同管理", "劳动合同", "劳务合同", "组织架构"]
+
+        file_has_procurement = any(term in file_name for term in ["采购", "请购", "仓库", "办公用品", "物资"])
+        procurement_hits = sum(1 for term in procurement_terms if term in combined)
+        approval_hits = sum(1 for term in approval_terms if term in combined)
+        amount_hits = sum(1 for term in amount_terms if term in combined)
+
+        if any(term in file_name for term in polluted_file_terms) and not file_has_procurement:
+            return procurement_hits >= 2 and approval_hits >= 1
+        if any(term in query for term in ["审批", "批准", "审核", "金额", "万元", "5万", "5000", "超过"]):
+            return (
+                file_has_procurement and approval_hits >= 1
+                or procurement_hits >= 2 and approval_hits >= 1
+                or procurement_hits >= 1 and approval_hits >= 1 and amount_hits >= 1
+            )
+        return file_has_procurement or procurement_hits >= 2
+
     def domain_aware_rerank(self, query: str, documents: List[Document]) -> List[Document]:
         if not documents:
             return []
@@ -495,12 +537,14 @@ class RagSummarizeService:
             content_terms = set(self.tokenize(content_text[:800]))
             overlap = len(query_terms & content_terms)
             rrf_score = float(metadata.get("weighted_rrf_score", 0) or 0)
+            procurement_priority = self.procurement_priority_score(query, source_text, combined)
             score = (
                 1.0 / (rank + 1)
                 + rrf_score
                 + source_domain_hit * 0.18
                 + domain_hit * 0.08
                 + min(overlap, 8) * 0.015
+                + procurement_priority
             )
             ranked.append((score, rank, doc))
         ranked.sort(key=lambda item: (item[0], -item[1]), reverse=True)
@@ -509,6 +553,24 @@ class RagSummarizeService:
             doc.metadata = {**doc.metadata, "domain_rerank_score": round(score, 6), "domain_rerank_rank": new_rank}
             result.append(doc)
         return result
+
+    def procurement_priority_score(self, query: str, source_text: str, combined: str) -> float:
+        if self.infer_query_domain(query) != "procurement":
+            return 0.0
+
+        score = 0.0
+        if any(term in source_text for term in ["采购管理制度", "采购部工作流程", "采购管理流程"]):
+            score += 0.45
+        if "采购" in source_text:
+            score += 0.2
+        if any(term in combined for term in ["请购单", "采购申请", "采购核准权限"]):
+            score += 0.25
+        if any(term in query for term in ["审批", "批准", "审核", "金额", "万元", "超过"]):
+            if any(term in combined for term in ["审批", "批准", "审核", "核准", "总经理", "副总", "财务总监", "分管领导"]):
+                score += 0.35
+        if any(term in source_text for term in ["岗位职责", "销售管理", "合同管理", "仓库管理"]):
+            score -= 0.35
+        return score
 
     def rerank(self, query: str, documents: List[Document]) -> List[Document]:
         if not documents:
