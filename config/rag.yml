@@ -1,0 +1,4 @@
+llm_provider: dashscope
+chat_model_name: qwen3.7-max
+embedding_model_name: text-embedding-v4
+autodl_base_url: https://www.autodl.art/api/v1

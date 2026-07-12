@@ -1,0 +1,10 @@
+collection_name: enterprise_policy
+persist_directory: chroma_db/enterprise  #存储位置
+k: 3
+data_path: data/enterprise
+md5_hex_store: md5_enterprise.text
+allow_knowledge_file_type: ["txt", "pdf"] #允许的文件类型
+
+chunk_size: 350
+chunk_overlap: 50
+separators: ["\n\n", "\n", ".", "!", "?", "。", "！", "？", " ", ""]

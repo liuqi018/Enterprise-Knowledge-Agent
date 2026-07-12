@@ -1,0 +1,44 @@
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+.venv310/
+venv/
+env/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Runtime logs
+logs/
+*.log
+
+# Evaluation outputs
+eval/results/
+
+# Local databases and generated indexes
+chroma_db/
+*.sqlite
+*.sqlite3
+*.db
+
+# Generated RAG artifacts
+bm25_corpus.jsonl
+knowledge_manifest.json
+
+# Local/private knowledge data. Remove this rule if you intentionally want to version sample data.
+data/

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>企业知识智能体平台</title>
+  <link rel="stylesheet" href="/static/styles.css?v=compact-20260711" />
+</head>
+<body>
+  <section id="loginOverlay" class="login-overlay">
+    <form id="loginForm" class="login-card">
+      <p class="eyebrow">Secure Access</p>
+      <h2 id="authTitle">登录企业知识智能体</h2>
+      <input id="usernameInput" type="text" placeholder="用户名" autocomplete="username" />
+      <input id="passwordInput" type="password" placeholder="密码" autocomplete="current-password" />
+      <button id="authSubmitBtn" type="submit" class="primary-btn">登录</button>
+      <button id="switchAuthModeBtn" type="button" class="ghost-btn">没有账号？注册普通用户</button>
+      <p id="loginError" class="hint"></p>
+    </form>
+  </section>
+  <main class="shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">EA</div>
+        <div>
+          <h1>企业知识智能体</h1>
+          <p>RAG + Agent 工作台</p>
+        </div>
+      </div>
+
+      <section class="panel">
+        <div class="panel-title">系统状态</div>
+        <div class="stat-row">
+          <span>当前用户</span>
+          <strong id="currentUser">未登录</strong>
+        </div>
+        <div class="stat-row">
+          <span>服务</span>
+          <strong id="serviceStatus">检测中</strong>
+        </div>
+        <div class="stat-row">
+          <span>向量库</span>
+          <strong id="backend">-</strong>
+        </div>
+        <div class="stat-row">
+          <span>向量数量</span>
+          <strong id="docCount">-</strong>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">知识库管理</div>
+        <button id="ingestBtn" class="primary-btn">增量更新知识库</button>
+        <button id="forceIngestBtn" class="ghost-btn">强制重建索引</button>
+        <button id="logoutBtn" class="ghost-btn">退出登录</button>
+        <p id="ingestResult" class="hint"></p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">历史会话</div>
+        <button id="newChatBtn" class="primary-btn">新建会话</button>
+        <div id="conversationList" class="conversation-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">模式</div>
+        <label class="switch-row">
+          <input id="agentMode" type="checkbox" checked />
+          <span>启用 Agent 工具编排</span>
+        </label>
+        <p class="hint">关闭后只走 RAG 检索问答，便于对比效果。</p>
+      </section>
+
+      <section class="panel examples">
+        <div class="panel-title">示例问题</div>
+        <button data-example="病假超过一天需要什么证明？">病假证明要求</button>
+        <button data-example="超过5000元采购怎么审批？">采购审批流程</button>
+        <button data-example="帮我生成一个云资源采购申请草稿">生成申请草稿</button>
+        <button data-example="给我生成本月制度咨询报告">制度咨询报告</button>
+      </section>
+    </aside>
+
+    <section class="workspace">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Enterprise AI Agent Platform</p>
+          <h2>制度问答、流程生成、多工具协同调用</h2>
+          <p>面向企业内部制度查询与流程处理场景，支持知识库动态更新和多轮上下文。</p>
+        </div>
+        <a class="docs-link" href="/docs" target="_blank">API Docs</a>
+      </header>
+
+      <section id="chatList" class="chat-list">
+        <article class="message assistant">
+          <div class="avatar">AI</div>
+          <div class="bubble">
+            <p>你好，我可以查询企业制度、生成流程申请草稿，也可以结合工具生成咨询报告。</p>
+          </div>
+        </article>
+      </section>
+
+      <form id="chatForm" class="composer">
+        <textarea id="queryInput" rows="1" placeholder="输入问题，例如：报销需要上传什么附件？"></textarea>
+        <button id="sendBtn" type="submit">发送</button>
+      </form>
+    </section>
+  </main>
+
+  <script src="/static/app.js?v=compact-20260711"></script>
+</body>
+</html>
