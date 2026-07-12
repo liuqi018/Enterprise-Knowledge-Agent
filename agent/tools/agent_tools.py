@@ -5,6 +5,7 @@ from datetime import datetime
 from langchain_core.tools import tool
 
 from AIRAGAgent.rag.rag_service import RagSummarizeService
+from AIRAGAgent.utils.amount_parser import normalize_amount
 from AIRAGAgent.utils.config_handler import agent_config
 from AIRAGAgent.utils.logger_handler import logger
 from AIRAGAgent.utils.path_tool import get_abs_path
@@ -91,18 +92,19 @@ def create_application_draft(application_type: str, reason: str, key_info: str) 
 @tool(description="根据申请类型、金额和部门判断企业内部审批路径，适用于采购、报销、请假、权限开通等流程类问题")
 def query_approval_path(application_type: str, amount: float = 0, department: str = DEMO_DEPARTMENT) -> str:
     app_type = application_type.strip()
+    parsed_amount = normalize_amount(amount, application_type)
     steps = ["直属主管"]
 
     if any(word in app_type for word in ["采购", "合同"]):
         steps.append("部门负责人")
-        if amount >= 5000:
+        if parsed_amount >= 5000:
             steps.append("财务审核")
-        if amount >= 10000:
+        if parsed_amount >= 10000:
             steps.append("总经理审批")
         required = "采购申请说明、预算依据、供应商信息、报价单"
     elif any(word in app_type for word in ["报销", "差旅", "费用"]):
         steps.append("财务审核")
-        if amount >= 3000:
+        if parsed_amount >= 3000:
             steps.append("部门负责人复核")
         required = "发票、付款凭证、费用明细、审批单"
     elif any(word in app_type for word in ["请假", "病假", "年假"]):
@@ -116,12 +118,24 @@ def query_approval_path(application_type: str, amount: float = 0, department: st
         steps.append("部门负责人")
         required = "申请说明、相关附件"
 
+    basis_query = f"{application_type} 审批路径 所需材料 制度依据"
+    basis = get_rag_service().rag_summarize(basis_query)
+    basis_status = "制度依据明确" if basis and "知识库中没有明确依据" not in basis else "制度依据不足"
+    confidence_note = (
+        "以下审批路径为工具规则结合制度检索结果生成，请以制度原文和实际审批系统为准。"
+        if basis_status == "制度依据明确"
+        else "以下审批路径主要为规则推断，当前知识库未提供完整明确依据，提交前需要人工确认。"
+    )
+
     return (
         f"申请类型：{application_type}\n"
-        f"申请金额：{amount}\n"
+        f"识别金额：{parsed_amount}\n"
         f"所属部门：{department}\n"
         f"建议审批路径：{' → '.join(steps)}\n"
-        f"建议准备材料：{required}"
+        f"建议准备材料：{required}\n"
+        f"依据状态：{basis_status}\n"
+        f"制度依据摘要：{basis}\n"
+        f"可信度说明：{confidence_note}"
     )
 
 
@@ -144,8 +158,9 @@ def locate_policy_clause(query: str, top_k: int = 3) -> str:
 def check_policy_risk(application_type: str, content: str, amount: float = 0) -> str:
     risks = []
     text = f"{application_type} {content}"
+    parsed_amount = normalize_amount(amount, text)
 
-    if amount >= 10000 and any(word in text for word in ["采购", "报销", "费用"]):
+    if parsed_amount >= 10000 and any(word in text for word in ["采购", "报销", "费用"]):
         risks.append(("高", "金额较高，可能需要财务和总经理审批", "补充预算依据、报价单和业务必要性说明。"))
     if any(word in text for word in ["长期权限", "永久权限", "数据库权限", "生产权限"]):
         risks.append(("高", "权限申请可能违反最小权限和临时授权原则", "明确权限范围和有效期，改为临时授权并增加负责人审批。"))
