@@ -528,7 +528,7 @@ class RagSummarizeService:
             metadata = doc.metadata or {}
             source_text = " ".join(
                 str(metadata.get(key, ""))
-                for key in ["file_name", "source", "section_title", "policy_domain"]
+                for key in ["file_name", "source", "section_title", "policy_domain", "document_type"]
             )
             content_text = doc.page_content or ""
             combined = f"{source_text} {content_text[:600]}"
@@ -538,6 +538,7 @@ class RagSummarizeService:
             overlap = len(query_terms & content_terms)
             rrf_score = float(metadata.get("weighted_rrf_score", 0) or 0)
             procurement_priority = self.procurement_priority_score(query, source_text, combined)
+            document_type_priority = self.document_type_priority_score(metadata)
             score = (
                 1.0 / (rank + 1)
                 + rrf_score
@@ -545,6 +546,7 @@ class RagSummarizeService:
                 + domain_hit * 0.08
                 + min(overlap, 8) * 0.015
                 + procurement_priority
+                + document_type_priority
             )
             ranked.append((score, rank, doc))
         ranked.sort(key=lambda item: (item[0], -item[1]), reverse=True)
@@ -553,6 +555,14 @@ class RagSummarizeService:
             doc.metadata = {**doc.metadata, "domain_rerank_score": round(score, 6), "domain_rerank_rank": new_rank}
             result.append(doc)
         return result
+
+    def document_type_priority_score(self, metadata: Dict[str, Any]) -> float:
+        document_type = metadata.get("document_type")
+        if document_type == "policy":
+            return 0.18
+        if document_type in {"contract_template", "job_description", "form_template"}:
+            return -0.18
+        return 0.0
 
     def procurement_priority_score(self, query: str, source_text: str, combined: str) -> float:
         if self.infer_query_domain(query) != "procurement":
@@ -826,6 +836,7 @@ class RagSummarizeService:
                 {
                     "source": doc.metadata.get("source"),
                     "file_name": doc.metadata.get("file_name"),
+                    "document_type": doc.metadata.get("document_type"),
                     "policy_domain": doc.metadata.get("policy_domain"),
                     "chunk_index": doc.metadata.get("chunk_index"),
                     "section_title": doc.metadata.get("section_title"),

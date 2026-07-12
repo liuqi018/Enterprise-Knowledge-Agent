@@ -4,6 +4,9 @@ from typing import Iterable, List, Optional
 
 from langchain_core.documents import Document
 
+from AIRAGAgent.knowledge.cleaner import clean_text
+from AIRAGAgent.knowledge.cleaner import infer_document_type
+from AIRAGAgent.knowledge.cleaner import infer_policy_domain
 from AIRAGAgent.utils.file_handler import get_file_md5_hex, pdf_loader, txt_loader
 
 
@@ -51,15 +54,18 @@ def load_documents(source_file: SourceFile) -> List[Document]:
         docs = []
 
     for doc in docs:
+        doc.page_content = clean_text(doc.page_content)
+        document_type = infer_document_type(source_file.path, doc.page_content)
         policy_domain = infer_policy_domain(source_file.path, doc.page_content)
         doc.metadata = {
             **doc.metadata,
             "source": source_file.path,
             "file_md5": source_file.md5 or "",
             "file_name": os.path.basename(source_file.path),
+            "document_type": document_type,
             "policy_domain": policy_domain,
         }
-    return docs
+    return [doc for doc in docs if doc.page_content]
 
 
 def docx_loader(filepath: str) -> List[Document]:
@@ -110,22 +116,3 @@ def doc_loader(filepath: str) -> List[Document]:
     if not content:
         return []
     return [Document(page_content=content, metadata={"source": filepath})]
-
-
-def infer_policy_domain(path: str, content: str = "") -> str:
-    text = f"{os.path.basename(path)} {content[:500]}"
-    domain_keywords = {
-        "reimbursement": ["报销", "差旅", "费用", "发票"],
-        "leave_attendance": ["请假", "事假", "考勤", "病假", "年假", "调休"],
-        "procurement": ["采购", "请购", "供应商", "询价", "报价", "验收", "仓库", "办公用品", "物资"],
-        "security": ["信息安全", "权限", "账号", "数据", "安全"],
-        "onboarding": ["入职", "转正", "试用期"],
-        "ticket_sop": ["工单", "SOP", "客户", "处理"],
-    }
-    basename = os.path.basename(path)
-    if "采购" not in basename and any(term in basename for term in ["岗位职责", "销售管理", "合同管理", "劳动合同", "劳务合同"]):
-        text = content[:500]
-    for domain, keywords in domain_keywords.items():
-        if any(keyword in text for keyword in keywords):
-            return domain
-    return "general"

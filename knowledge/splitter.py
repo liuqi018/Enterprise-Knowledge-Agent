@@ -5,6 +5,7 @@ from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from AIRAGAgent.config.settings import settings
+from AIRAGAgent.knowledge.cleaner import is_low_value_chunk
 
 
 TITLE_PATTERN = re.compile(
@@ -40,6 +41,8 @@ def split_documents(
                     "section_index": section_index,
                     "section_chunk_index": local_index,
                 }
+                if is_low_value_chunk(chunk_text, metadata):
+                    continue
                 chunks.append(Document(page_content=chunk_text, metadata=metadata))
 
     for index, chunk in enumerate(chunks):
