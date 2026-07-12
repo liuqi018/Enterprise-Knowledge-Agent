@@ -2,6 +2,7 @@ const state = {
   sessionId: localStorage.getItem("enterprise-agent-session") || null,
   token: localStorage.getItem("enterprise-agent-token") || null,
   authMode: "login",
+  isBusy: false,
 };
 
 const loginOverlay = document.querySelector("#loginOverlay");
@@ -117,8 +118,8 @@ function clearBubbleStatus(bubble) {
 }
 
 function setBusy(isBusy) {
+  state.isBusy = isBusy;
   sendBtn.disabled = isBusy;
-  queryInput.disabled = isBusy;
   sendBtn.textContent = isBusy ? "处理中" : "发送";
 }
 
@@ -209,6 +210,9 @@ async function pollIngestTask(taskId) {
 
 chatForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (state.isBusy) {
+    return;
+  }
   const query = queryInput.value.trim();
   if (!query) {
     return;
@@ -365,6 +369,9 @@ queryInput.addEventListener("input", () => {
 queryInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
+    if (state.isBusy) {
+      return;
+    }
     chatForm.requestSubmit();
   }
 });
