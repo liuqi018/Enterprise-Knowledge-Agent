@@ -292,6 +292,49 @@ IT 变更发布需要经过哪些步骤？
 信息系统用户访问权限如何申请和管理？
 ```
 
+## 效果评测
+
+项目提供一套 160 条制造企业制度问答评测集，覆盖生产、质量、财务、报销、采购、仓储、人事、考勤、薪酬绩效、研发、IT 服务和信息安全等业务域。
+
+评测集位置：
+
+```text
+eval/manufacturing_rag_eval_160.jsonl
+```
+
+重新生成评测集：
+
+```powershell
+python scripts\generate_manufacturing_eval_160.py
+```
+
+只评测检索效果：
+
+```powershell
+python scripts\evaluate_manufacturing_rag.py --skip-answer --max-k 5
+```
+
+小样本快速验证：
+
+```powershell
+python scripts\evaluate_manufacturing_rag.py --skip-answer --limit 20 --max-k 5
+```
+
+评测脚本会输出 JSON 和 Markdown 报告到：
+
+```text
+eval/results/
+```
+
+主要指标包括：
+
+- `hit@1 / hit@3 / hit@5`：Top-K 召回是否命中期望业务域或来源关键词
+- `domain_hit@3`：Top-3 中是否命中期望业务域
+- `source_hit@3`：Top-3 中是否命中期望来源关键词
+- `mrr`：首个相关结果排名质量
+- `ndcg@5`：Top-5 排序质量
+- `answer_keyword_coverage`：回答关键词覆盖率，非 `--skip-answer` 模式下统计
+
 ## 项目亮点
 
 - 将项目场景收敛到制造企业，而不是泛化问答，业务边界更清晰
