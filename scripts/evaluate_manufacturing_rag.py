@@ -125,7 +125,8 @@ def evaluate_case(
 
     doc_texts = [text_of_doc(doc) for doc in docs]
     domains = [metadata_domain(doc) for doc in docs]
-    source_relevance = [1 if keyword_hits(text, source_keywords) else 0 for text in doc_texts]
+    source_keyword_hits_by_doc = [keyword_hits(text, source_keywords) for text in doc_texts]
+    source_relevance = [1 if hits else 0 for hits in source_keyword_hits_by_doc]
     domain_relevance = [1 if domain == expected_domain else 0 for domain in domains]
 
     combined_relevance = [
@@ -150,6 +151,9 @@ def evaluate_case(
         answer = service.generate_answer(query, docs) if docs else ""
         answer_latency_ms = (time.perf_counter() - answer_start) * 1000
         answer_keyword_hit_list = keyword_hits(answer, answer_keywords)
+    missing_answer_keywords = [
+        keyword for keyword in answer_keywords if keyword not in answer_keyword_hit_list
+    ]
 
     answer_keyword_coverage = (
         len(answer_keyword_hit_list) / len(answer_keywords)
@@ -167,12 +171,16 @@ def evaluate_case(
         "retrieved_domains": domains,
         "retrieved_sources": [
             {
+                "rank": index + 1,
                 "file_name": (doc.metadata or {}).get("file_name"),
                 "policy_domain": metadata_domain(doc),
                 "section_title": (doc.metadata or {}).get("section_title"),
-                "preview": doc.page_content[:120],
+                "domain_match": domain_relevance[index] == 1,
+                "source_match": source_relevance[index] == 1,
+                "source_keyword_hits": source_keyword_hits_by_doc[index],
+                "preview": doc.page_content[:260],
             }
-            for doc in docs
+            for index, doc in enumerate(docs)
         ],
         "first_hit_rank": first_hit_rank,
         "hit@1": hit_at_1,
@@ -185,6 +193,7 @@ def evaluate_case(
         "retrieval_latency_ms": round(retrieval_latency_ms, 2),
         "answer": answer,
         "answer_keyword_hits": answer_keyword_hit_list,
+        "missing_answer_keywords": missing_answer_keywords,
         "answer_keyword_coverage": round(answer_keyword_coverage, 4),
         "answer_latency_ms": round(answer_latency_ms, 2),
     }
@@ -227,6 +236,29 @@ def summarize_by_group(rows: list[dict[str, Any]], group_key: str, skip_answer: 
     return {name: summarize(group_rows, skip_answer) for name, group_rows in sorted(groups.items())}
 
 
+def diagnose_failure(row: dict[str, Any], skip_answer: bool, min_answer_coverage: float) -> str:
+    if row["hit@3"] == 0:
+        return "retrieval_miss"
+    if row["source_hit@3"] == 0:
+        return "source_keyword_mismatch"
+    if row["domain_hit@3"] == 0:
+        return "domain_mismatch"
+    if not skip_answer and row["answer_keyword_coverage"] < min_answer_coverage:
+        return "answer_keyword_gap"
+    return "unknown"
+
+
+def compact_text(text: str, limit: int = 220) -> str:
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def markdown_cell(text: Any, limit: int = 180) -> str:
+    return compact_text(str(text or ""), limit).replace("|", "\\|")
+
+
 def failed_rows(rows: list[dict[str, Any]], skip_answer: bool, min_answer_coverage: float) -> list[dict[str, Any]]:
     result = []
     for row in rows:
@@ -234,7 +266,9 @@ def failed_rows(rows: list[dict[str, Any]], skip_answer: bool, min_answer_covera
         if not skip_answer and row["answer_keyword_coverage"] < min_answer_coverage:
             failed = True
         if failed:
-            result.append(row)
+            failed_row = dict(row)
+            failed_row["failure_reason"] = diagnose_failure(row, skip_answer, min_answer_coverage)
+            result.append(failed_row)
     return result
 
 
@@ -265,6 +299,12 @@ def write_markdown(report: dict[str, Any], output_path: Path) -> None:
             f"{item['source_hit@3']} | {item['mrr']} | {item['ndcg@5']} |"
         )
 
+    if report["failed"]:
+        reason_counts = Counter(row.get("failure_reason", "unknown") for row in report["failed"])
+        lines.extend(["", "## Failure Reason Counts", "", "| Reason | Count |", "| --- | ---: |"])
+        for reason, count in reason_counts.most_common():
+            lines.append(f"| {reason} | {count} |")
+
     lines.extend(["", "## Failed Cases", ""])
     if not report["failed"]:
         lines.append("No failed cases under the current thresholds.")
@@ -272,8 +312,44 @@ def write_markdown(report: dict[str, Any], output_path: Path) -> None:
         for row in report["failed"][:30]:
             lines.append(
                 f"- `{row['id']}` [{row['expected_domain']}] {row['query']} "
-                f"(hit@3={row['hit@3']}, first_hit_rank={row['first_hit_rank']})"
+                f"(reason={row.get('failure_reason', 'unknown')}, "
+                f"hit@3={row['hit@3']}, first_hit_rank={row['first_hit_rank']}, "
+                f"answer_coverage={row.get('answer_keyword_coverage', 0)})"
             )
+
+    if report["failed"]:
+        lines.extend(["", "## Failed Case Diagnostics", ""])
+        for row in report["failed"][:30]:
+            lines.extend(
+                [
+                    f"### {row['id']} [{row['expected_domain']}]",
+                    "",
+                    f"- Question: {row['query']}",
+                    f"- Failure reason: `{row.get('failure_reason', 'unknown')}`",
+                    f"- Retrieval: hit@3={row['hit@3']}, source_hit@3={row['source_hit@3']}, "
+                    f"domain_hit@3={row['domain_hit@3']}, first_hit_rank={row['first_hit_rank']}",
+                    f"- Expected source keywords: {', '.join(row.get('expected_source_keywords') or [])}",
+                    f"- Expected answer keywords: {', '.join(row.get('expected_answer_keywords') or [])}",
+                    f"- Answer keyword hits: {', '.join(row.get('answer_keyword_hits') or []) or 'None'}",
+                    f"- Missing answer keywords: {', '.join(row.get('missing_answer_keywords') or []) or 'None'}",
+                    f"- Answer excerpt: {compact_text(row.get('answer', ''), 500) or 'N/A'}",
+                    "",
+                    "| Rank | Domain | Domain Match | Source Match | Keyword Hits | File | Section | Preview |",
+                    "| ---: | --- | --- | --- | --- | --- | --- | --- |",
+                ]
+            )
+            for source in row.get("retrieved_sources", [])[:5]:
+                lines.append(
+                    f"| {source.get('rank', '')} "
+                    f"| {markdown_cell(source.get('policy_domain', ''), 80)} "
+                    f"| {source.get('domain_match', False)} "
+                    f"| {source.get('source_match', False)} "
+                    f"| {markdown_cell(', '.join(source.get('source_keyword_hits') or []) or 'None', 120)} "
+                    f"| {markdown_cell(source.get('file_name') or '', 120)} "
+                    f"| {markdown_cell(source.get('section_title') or '', 120)} "
+                    f"| {markdown_cell(source.get('preview', ''), 180)} |"
+                )
+            lines.append("")
     output_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
