@@ -64,6 +64,10 @@ class Settings:
     COMPRESSED_CONTEXT_CHARS_PER_DOC = int(os.getenv("COMPRESSED_CONTEXT_CHARS_PER_DOC", "900"))
     MAX_HISTORY_MESSAGES = int(os.getenv("MAX_HISTORY_MESSAGES", "12"))
     MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "6000"))
+    CONTEXT_REWRITE_ENABLED = os.getenv("CONTEXT_REWRITE_ENABLED", "true").lower() == "true"
+    CONTEXT_SUMMARY_ENABLED = os.getenv("CONTEXT_SUMMARY_ENABLED", "true").lower() == "true"
+    CONTEXT_SUMMARY_TRIGGER_MESSAGES = int(os.getenv("CONTEXT_SUMMARY_TRIGGER_MESSAGES", "6"))
+    CONTEXT_RECENT_MESSAGES = int(os.getenv("CONTEXT_RECENT_MESSAGES", "6"))
 
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
     REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))

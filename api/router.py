@@ -169,6 +169,7 @@ def chat_stream(request: ChatRequest, current_user: User = Depends(get_current_u
 @router.delete("/sessions/{session_id}", response_model=ApiResponse)
 def clear_session(session_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     conversation_service.clear(db, current_user.id, session_id)
+    chat_service.clear_context(session_id)
     return ApiResponse(message="session cleared")
 
 

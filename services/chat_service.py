@@ -12,6 +12,7 @@ from AIRAGAgent.model.factory import chat_model
 from AIRAGAgent.rag.rag_service import RagSummarizeService
 from AIRAGAgent.schemas import ChatMessage, ChatResponse
 from AIRAGAgent.services.conversation_service import conversation_service
+from AIRAGAgent.services.context_service import context_service
 from AIRAGAgent.services.query_classifier import classify_query, needs_clarification
 from AIRAGAgent.services.session_service import session_service
 from AIRAGAgent.utils.logger_handler import logger
@@ -79,29 +80,31 @@ class ChatService:
         self._append(db, user_id, sid, "user", query)
 
         clarification = self._resolve_clarification_choice(merged_history, query)
-        route = classify_query(query)
+        effective_query = query if clarification else context_service.resolve_query(sid, query, merged_history)
+        route = classify_query(effective_query)
         sources = []
         try:
             if clarification:
                 answer, sources = self._answer_clarification_choice(clarification, tenant_id, merged_history)
             elif self._needs_clarification(route):
-                answer = self._clarification_answer(query)
+                answer = self._clarification_answer(effective_query)
             elif route.mode == "chat":
-                answer = self._small_talk_answer(query)
+                answer = self._small_talk_answer(effective_query)
             elif use_agent and route.mode == "flow":
                 history_payload = self._history_payload(merged_history)
-                answer = self._workflow().invoke(query, history_payload).strip()
+                answer = self._workflow().invoke(effective_query, history_payload).strip()
             else:
-                rag_response = self.rag_service.answer(query, tenant_id=tenant_id)
+                rag_response = self.rag_service.answer(effective_query, tenant_id=tenant_id)
                 answer = rag_response.answer
                 sources = rag_response.sources
         except Exception as exc:
             logger.error("[chat] failed, fallback to RAG: %s", exc, exc_info=True)
-            rag_response = self.rag_service.answer(query, tenant_id=tenant_id)
+            rag_response = self.rag_service.answer(effective_query, tenant_id=tenant_id)
             answer = rag_response.answer
             sources = rag_response.sources
 
         self._append(db, user_id, sid, "assistant", answer)
+        context_service.update_summary(sid, merged_history, query, answer)
         return ChatResponse(session_id=sid, answer=answer, sources=sources)
 
     def stream_answer(
@@ -120,7 +123,8 @@ class ChatService:
         yield self._stream_event("session", {"session_id": sid})
 
         clarification = self._resolve_clarification_choice(merged_history, query)
-        route = classify_query(query)
+        effective_query = query if clarification else context_service.resolve_query(sid, query, merged_history)
+        route = classify_query(effective_query)
         full_answer = ""
         sources = []
         try:
@@ -131,24 +135,24 @@ class ChatService:
                     sources = chunk_sources
                     yield self._stream_event("delta", {"content": chunk})
             elif self._needs_clarification(route):
-                full_answer = self._clarification_answer(query)
+                full_answer = self._clarification_answer(effective_query)
                 yield self._stream_event("status", {"message": "需要确认你的意图..."})
                 yield self._stream_event("delta", {"content": full_answer})
             elif route.mode == "chat":
-                full_answer = self._small_talk_answer(query)
+                full_answer = self._small_talk_answer(effective_query)
                 yield self._stream_event("status", {"message": "正在生成回答..."})
                 yield self._stream_event("delta", {"content": full_answer})
             elif use_agent and route.mode == "flow":
                 yield self._stream_event("status", {"message": "正在生成流程方案..."})
                 history_payload = self._history_payload(merged_history)
-                for chunk in self._workflow().stream(query, history_payload):
+                for chunk in self._workflow().stream(effective_query, history_payload):
                     if not full_answer:
                         yield self._stream_event("status", {"message": "正在生成回答..."})
                     full_answer += chunk
                     yield self._stream_event("delta", {"content": chunk})
             else:
                 yield self._stream_event("status", {"message": "正在快速检索制度库..."})
-                for chunk, rag_sources in self.rag_service.stream_answer(query, tenant_id=tenant_id):
+                for chunk, rag_sources in self.rag_service.stream_answer(effective_query, tenant_id=tenant_id):
                     if not full_answer:
                         yield self._stream_event("status", {"message": "正在生成回答..."})
                     full_answer += chunk
@@ -157,12 +161,13 @@ class ChatService:
         except Exception as exc:
             logger.error("[chat stream] failed, fallback to RAG: %s", exc, exc_info=True)
             yield self._stream_event("status", {"message": "出现异常，正在使用 RAG 兜底回答..."})
-            rag_response = self.rag_service.answer(query, tenant_id=tenant_id)
+            rag_response = self.rag_service.answer(effective_query, tenant_id=tenant_id)
             full_answer = rag_response.answer
             sources = rag_response.sources
             yield self._stream_event("delta", {"content": full_answer})
 
         self._append(db, user_id, sid, "assistant", full_answer.strip())
+        context_service.update_summary(sid, merged_history, query, full_answer.strip())
         yield self._stream_event("done", {"session_id": sid, "sources": sources})
 
     def _history_payload(self, history: List[ChatMessage]) -> List[dict]:
@@ -284,6 +289,9 @@ class ChatService:
             conversation_service.append(db, user_id, session_id, role, content)
             return
         session_service.append(session_id, role, content)
+
+    def clear_context(self, session_id: str) -> None:
+        context_service.clear(session_id)
 
 
 chat_service = ChatService()
