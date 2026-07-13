@@ -75,6 +75,22 @@ FOLLOW_UP_MARKERS = {
     "呢",
 }
 
+FORCE_MERGE_MARKERS = {
+    "谁负责",
+    "谁审批",
+    "谁上报",
+    "谁处理",
+    "哪些材料",
+    "什么材料",
+    "需要哪些",
+    "提前多久",
+    "多久",
+    "怎么办",
+    "怎么处理",
+    "需要吗",
+    "是否需要",
+}
+
 BUSINESS_KEYWORDS = {
     "采购",
     "报销",
@@ -112,6 +128,9 @@ class ContextService:
         if not history or not self._needs_rewrite(query):
             return query
 
+        if self._force_merge_follow_up(query):
+            return self._fallback_rewrite(query, history)
+
         summary = self.get_summary(session_id)
         history_text = self._format_history(history, limit=settings.CONTEXT_RECENT_MESSAGES)
         try:
@@ -119,7 +138,7 @@ class ContextService:
                 {"summary": summary or "无", "history": history_text or "无", "query": query}
             ).strip()
             rewritten = self._clean_rewritten_query(rewritten)
-            if self._valid_rewrite(query, rewritten):
+            if self._valid_rewrite(query, rewritten, history):
                 logger.info("[Context] query rewritten original=%s rewritten=%s", query, rewritten)
                 return rewritten
             logger.info("[Context] ignored invalid rewrite original=%s rewritten=%s", query, rewritten)
@@ -169,15 +188,22 @@ class ContextService:
 
     def _needs_rewrite(self, query: str) -> bool:
         text = query.strip()
-        if len(text) <= 4:
-            return False
         marker_hit = any(marker in text for marker in FOLLOW_UP_MARKERS)
+        force_hit = any(marker in text for marker in FORCE_MERGE_MARKERS)
         business_hit = any(keyword in text for keyword in BUSINESS_KEYWORDS)
+        if len(text) <= 4 and not marker_hit and not force_hit:
+            return False
+        if force_hit:
+            return True
         if marker_hit and (len(text) <= 28 or not business_hit):
             return True
         if len(text) <= 14 and not business_hit:
             return True
         return False
+
+    def _force_merge_follow_up(self, query: str) -> bool:
+        text = query.strip()
+        return len(text) <= 24 and any(marker in text for marker in FORCE_MERGE_MARKERS)
 
     def _fallback_rewrite(self, query: str, history: List[ChatMessage]) -> str:
         previous_user = self._last_user_message(history)
@@ -208,14 +234,22 @@ class ContextService:
                 cleaned = cleaned[len(prefix) :].strip()
         return cleaned.strip("“”\"'")
 
-    def _valid_rewrite(self, original: str, rewritten: str) -> bool:
+    def _valid_rewrite(self, original: str, rewritten: str, history: List[ChatMessage]) -> bool:
         if not rewritten:
             return False
         if len(rewritten) > 160:
             return False
         if any(bad in rewritten for bad in ["无法改写", "不能确定", "不知道"]):
             return False
+        if rewritten.strip() == original.strip() and self._last_user_message(history):
+            return False
+        previous_user = self._last_user_message(history)
+        if previous_user and self._has_business_keyword(previous_user) and not self._has_business_keyword(rewritten):
+            return False
         return original in rewritten or len(rewritten) >= len(original)
+
+    def _has_business_keyword(self, text: str) -> bool:
+        return any(keyword in text for keyword in BUSINESS_KEYWORDS)
 
     def _clean_summary(self, text: str) -> str:
         cleaned = " ".join(text.strip().split())
