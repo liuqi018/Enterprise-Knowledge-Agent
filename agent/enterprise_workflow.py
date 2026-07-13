@@ -23,6 +23,7 @@ from AIRAGAgent.config.settings import settings
 from AIRAGAgent.model.factory import chat_model
 from AIRAGAgent.services.query_classifier import classify_query
 from AIRAGAgent.utils.amount_parser import extract_amount
+from AIRAGAgent.utils.json_guard import parse_json_array
 from AIRAGAgent.utils.logger_handler import logger
 
 
@@ -236,16 +237,12 @@ class EnterpriseKnowledgeWorkflow:
             return []
 
     def _parse_plan_json(self, raw: str) -> List[Dict[str, Any]]:
-        text = raw.strip()
-        if text.startswith("```"):
-            text = re.sub(r"^```(?:json)?", "", text, flags=re.IGNORECASE).strip()
-            text = re.sub(r"```$", "", text).strip()
-        start = text.find("[")
-        end = text.rfind("]")
-        if start < 0 or end < start:
+        try:
+            payload = parse_json_array(raw)
+        except Exception as exc:
+            logger.warning("[EnterpriseWorkflow] failed to parse LLM plan JSON: %s", exc)
             return []
-        payload = json.loads(text[start : end + 1])
-        return payload if isinstance(payload, list) else []
+        return [step for step in payload if isinstance(step, dict)]
 
     def _validate_plan(
         self,
@@ -259,10 +256,11 @@ class EnterpriseKnowledgeWorkflow:
         for step in plan[:6]:
             if not isinstance(step, dict):
                 continue
-            tool_name = step.get("tool")
+            tool_name = step.get("tool") or step.get("name") or step.get("tool_name")
             if tool_name not in ALLOWED_TOOLS or tool_name in used_tools:
+                logger.warning("[EnterpriseWorkflow] ignored invalid or duplicated tool: %s", tool_name)
                 continue
-            args = step.get("args") or {}
+            args = step.get("args") or step.get("arguments") or step.get("parameters") or {}
             if not isinstance(args, dict):
                 args = {}
             allowed_args = ALLOWED_TOOLS[tool_name]
@@ -287,6 +285,10 @@ class EnterpriseKnowledgeWorkflow:
             key: self._stringify_arg(value) if key not in {"amount", "top_k"} else value
             for key, value in args.items()
         }
+        if "amount" in args:
+            args["amount"] = self._coerce_float(args.get("amount"), default=amount)
+        if "top_k" in args:
+            args["top_k"] = self._coerce_int(args.get("top_k"), default=3, minimum=1, maximum=10)
         if tool_name in {"rag_summarize", "locate_policy_clause"}:
             args.setdefault("query", query)
         elif tool_name == "query_approval_path":
@@ -303,6 +305,19 @@ class EnterpriseKnowledgeWorkflow:
             args.setdefault("reason", query)
             args.setdefault("key_info", f"金额：{amount}")
         return args
+
+    def _coerce_float(self, value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _coerce_int(self, value: Any, default: int = 3, minimum: int = 1, maximum: int = 10) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = default
+        return max(minimum, min(number, maximum))
 
     def _stringify_arg(self, value: Any) -> str:
         if isinstance(value, str):
@@ -351,8 +366,71 @@ class EnterpriseKnowledgeWorkflow:
                     context["month"] = result
             except Exception as exc:
                 logger.error("[EnterpriseWorkflow] tool %s failed: %s", tool_name, exc, exc_info=True)
-                results[tool_name] = f"工具执行失败：{exc}"
+                results[tool_name] = self._tool_failure_fallback(tool_name, args, state["query"], exc, results)
         return {**state, "tool_results": results}
+
+    def _tool_failure_fallback(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        query: str,
+        exc: Exception,
+        results: Dict[str, str],
+    ) -> str:
+        error = f"{type(exc).__name__}: {exc}"
+        try:
+            if tool_name == "rag_summarize":
+                clause = locate_policy_clause.invoke({"query": args.get("query") or query, "top_k": 3})
+                return f"工具 rag_summarize 执行失败，已降级为条款定位结果。\n失败原因：{error}\n{clause}"
+            if tool_name == "locate_policy_clause":
+                summary = rag_summarize.invoke({"query": args.get("query") or query})
+                return f"工具 locate_policy_clause 执行失败，已降级为制度摘要结果。\n失败原因：{error}\n{summary}"
+            if tool_name == "query_approval_path":
+                return (
+                    "审批路径工具执行失败，已启用保守兜底：请先提交直属主管审核，"
+                    "再由对应部门负责人、财务或总经理按实际制度确认。提交前必须人工核对制度原文。"
+                    f"\n失败原因：{error}"
+                )
+            if tool_name == "query_expense_standard":
+                basis = locate_policy_clause.invoke({"query": f"{query} 报销标准 费用标准 发票", "top_k": 3})
+                return f"费用标准工具执行失败，已降级检索制度依据。\n失败原因：{error}\n{basis}"
+            if tool_name == "check_policy_risk":
+                return (
+                    "风险校验工具执行失败，已启用保守兜底：当前事项需要人工复核制度依据、审批权限、"
+                    "金额阈值、附件材料和是否存在先执行后补审批风险。"
+                    f"\n失败原因：{error}"
+                )
+            if tool_name == "create_application_draft":
+                return (
+                    f"申请草稿工具执行失败，已生成最小草稿。\n"
+                    f"申请事项：{args.get('application_type') or query}\n"
+                    f"申请原因：{args.get('reason') or query}\n"
+                    f"关键信息：{args.get('key_info') or '资料未明确，提交前请补充制度依据和附件。'}\n"
+                    f"失败原因：{error}"
+                )
+            if tool_name == "fetch_external_data":
+                return f"外部数据工具执行失败，已跳过外部数据补充。失败原因：{error}"
+            if tool_name == "get_employee_id":
+                return "E1001"
+            if tool_name == "get_employee_department":
+                return "研发部"
+            if tool_name == "get_current_month":
+                return get_current_month.invoke({})
+            if tool_name == "fill_context_for_report":
+                return "报告上下文工具执行失败，已跳过上下文补充。"
+        except Exception as fallback_exc:
+            logger.error(
+                "[EnterpriseWorkflow] fallback for tool %s failed: %s",
+                tool_name,
+                fallback_exc,
+                exc_info=True,
+            )
+            return (
+                f"工具 {tool_name} 执行失败，兜底也失败。"
+                f"原始错误：{error}；兜底错误：{type(fallback_exc).__name__}: {fallback_exc}。"
+                "请人工核对制度依据后再处理。"
+            )
+        return f"工具 {tool_name} 执行失败：{error}。请人工核对制度依据后再处理。"
 
     def _enrich_args_from_context(
         self,
@@ -387,16 +465,28 @@ class EnterpriseKnowledgeWorkflow:
         review_notes = []
         if state.get("intent") in {"flow_generation", "expense_standard"} and "check_policy_risk" not in results:
             amount = self._extract_amount(query)
-            results["check_policy_risk"] = check_policy_risk.invoke(
-                {"application_type": query, "content": query, "amount": amount}
-            )
+            args = {"application_type": query, "content": query, "amount": amount}
+            try:
+                results["check_policy_risk"] = check_policy_risk.invoke(args)
+            except Exception as exc:
+                logger.error("[EnterpriseWorkflow] risk review tool failed: %s", exc, exc_info=True)
+                results["check_policy_risk"] = self._tool_failure_fallback(
+                    "check_policy_risk", args, query, exc, results
+                )
         risk_result = results.get("check_policy_risk", "")
         if "风险等级：高" in risk_result:
             review_notes.append("检测到高风险事项，最终回答需要提示用户补充材料或先进行人工确认。")
         if state.get("intent") in {"flow_generation", "risk_check"} and "locate_policy_clause" not in results:
             if not results.get("rag_summarize") or "未检索" in results.get("rag_summarize", ""):
-                results["locate_policy_clause"] = locate_policy_clause.invoke({"query": query, "top_k": 3})
-                review_notes.append("制度摘要不足，已补充执行条款定位。")
+                args = {"query": query, "top_k": 3}
+                try:
+                    results["locate_policy_clause"] = locate_policy_clause.invoke(args)
+                    review_notes.append("制度摘要不足，已补充执行条款定位。")
+                except Exception as exc:
+                    logger.error("[EnterpriseWorkflow] clause fallback failed: %s", exc, exc_info=True)
+                    results["locate_policy_clause"] = self._tool_failure_fallback(
+                        "locate_policy_clause", args, query, exc, results
+                    )
         if review_notes:
             results["review_notes"] = "\n".join(review_notes)
         return {**state, "tool_results": results, "review_notes": review_notes}

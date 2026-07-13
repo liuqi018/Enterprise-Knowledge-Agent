@@ -1,4 +1,3 @@
-import json
 import math
 import re
 from dataclasses import dataclass
@@ -6,6 +5,7 @@ from functools import lru_cache
 
 from AIRAGAgent.config.settings import settings
 from AIRAGAgent.model.factory import chat_model, embed_model
+from AIRAGAgent.utils.json_guard import coerce_bool, coerce_float, parse_json_object
 from AIRAGAgent.utils.logger_handler import logger
 
 
@@ -473,14 +473,14 @@ def classify_by_llm(query: str) -> QueryRoute:
     try:
         response = chat_model.invoke(ROUTE_PROMPT.format(query=query))
         content = getattr(response, "content", str(response))
-        data = json.loads(extract_json_object(content))
+        data = parse_json_object(content)
         retrieval_mode = data.get("retrieval_mode") or data.get("mode")
         if retrieval_mode in {"policy", "flow"}:
             retrieval_mode = "professional_policy" if retrieval_mode == "policy" else "complex_process"
         if retrieval_mode not in SEMANTIC_ROUTE_TO_MODE:
             raise ValueError(f"invalid retrieval_mode: {retrieval_mode}")
-        confidence = max(0.0, min(float(data.get("confidence", 0.7)), 1.0))
-        if data.get("needs_clarification"):
+        confidence = coerce_float(data.get("confidence"), default=0.7)
+        if coerce_bool(data.get("needs_clarification"), default=False):
             return QueryRoute(
                 SEMANTIC_ROUTE_TO_MODE[retrieval_mode],
                 f"llm_clarify_needed:{data.get('reason', 'ambiguous')}",
