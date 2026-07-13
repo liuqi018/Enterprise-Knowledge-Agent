@@ -33,6 +33,7 @@ class EnterpriseVectorStore:
                     "embedding_function": embed_model,
                     "collection_name": settings.MILVUS_COLLECTION,
                     "connection_args": {"uri": settings.MILVUS_URI, "alias": "default"},
+                    "search_params": {"metric_type": "L2", "params": {}},
                     "auto_id": False,
                 }
                 parameters = inspect.signature(Milvus.__init__).parameters
