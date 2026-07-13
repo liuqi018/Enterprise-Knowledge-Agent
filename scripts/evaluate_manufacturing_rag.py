@@ -23,6 +23,30 @@ from AIRAGAgent.config.settings import settings
 from AIRAGAgent.rag.rag_service import RagSummarizeService
 
 
+KEYWORD_SYNONYMS = {
+    "流程": ["步骤", "程序", "环节", "路径", "办理", "流转"],
+    "处理": ["处置", "整改", "跟进", "办理", "解决", "管控"],
+    "上报": ["报告", "汇报", "提交", "反馈", "报送"],
+    "检查": ["检验", "核查", "审核", "复核", "确认", "验收"],
+    "责任": ["负责人", "责任人", "责任部门", "职责", "分工"],
+    "材料": ["资料", "凭证", "单据", "附件", "证明", "记录"],
+    "审批": ["审核", "批准", "确认", "签批", "审批人"],
+    "风险": ["合规", "禁止", "不得", "注意", "隐患", "控制"],
+    "权限": ["账号", "授权", "访问控制", "访问权限"],
+    "生产": ["车间", "作业", "生产现场", "生产过程"],
+    "质量": ["品质", "检验", "不合格", "质量控制"],
+    "财务": ["资金", "付款", "收款", "会计", "预算"],
+    "报销": ["费用", "差旅", "借款", "发票"],
+    "采购": ["请购", "供应商", "采购申请", "采购合同"],
+    "仓库": ["库存", "入库", "出库", "物资"],
+    "研发": ["项目", "立项", "结项", "开发"],
+    "服务": ["ITSM", "事件", "问题", "服务请求"],
+    "安全": ["信息安全", "保密", "风险", "控制"],
+    "员工": ["人员", "职工", "新员工"],
+    "指标": ["KPI", "考核项", "权重", "评价"],
+}
+
+
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
     rows = []
     with path.open("r", encoding="utf-8") as file:
@@ -66,7 +90,14 @@ def metadata_domain(doc) -> str:
 
 
 def keyword_hits(text: str, keywords: list[str]) -> list[str]:
-    return [keyword for keyword in keywords if keyword and keyword in text]
+    hits = []
+    for keyword in keywords:
+        if not keyword:
+            continue
+        variants = [keyword] + KEYWORD_SYNONYMS.get(keyword, [])
+        if any(variant in text for variant in variants):
+            hits.append(keyword)
+    return hits
 
 
 def dcg(relevance: list[int]) -> float:
