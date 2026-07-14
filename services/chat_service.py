@@ -18,20 +18,22 @@ from AIRAGAgent.services.session_service import session_service
 from AIRAGAgent.utils.logger_handler import logger
 
 
-CLARIFICATION_PROMPT = """你是企业知识智能体的澄清助手。用户的问题存在多种可能意图，请生成一段自然、简洁的澄清回复。
+CLARIFICATION_PROMPT = """你是企业知识智能体的澄清助手。用户的问题存在多种可能处理方式，请根据问题动态生成澄清菜单。
 
 要求：
 1. 不要回答用户问题本身，只做意图确认。
-2. 必须保留下面三个编号选项，编号和含义不能变。
-3. 选项内容可以结合用户问题做轻微改写，使其更贴近场景。
-4. 语言简洁，不要超过 120 字。
+2. 必须输出 1、2、3 三个编号选项，用户可以回复编号继续。
+3. 三个选项要结合用户问题里的业务对象改写，不要总是使用固定套话。
+4. 三个选项的方向分别是：查询制度依据、生成流程/申请草稿、做风险/合规检查。
+5. 语言简洁，不要超过 140 字。
 
 用户问题：{query}
 
-必须包含：
-1. 查询相关制度、规则或流程
-2. 帮你生成申请草稿或流程方案
-3. 做风险校验或合规检查
+输出格式：
+你想让我按哪种方式处理“业务对象”？
+1. ...
+2. ...
+3. ...
 """
 
 CHAT_PROMPT = """你是企业知识智能体的对话助手。请回答用户的普通聊天、系统能力或回答规范类问题。
@@ -80,13 +82,16 @@ class ChatService:
         self._append(db, user_id, sid, "user", query)
 
         clarification = self._resolve_clarification_choice(merged_history, query)
+        contextual_follow_up = (
+            not clarification and context_service.is_contextual_follow_up(query, merged_history)
+        )
         effective_query = query if clarification else context_service.resolve_query(sid, query, merged_history)
         route = classify_query(effective_query)
         sources = []
         try:
             if clarification:
                 answer, sources = self._answer_clarification_choice(clarification, tenant_id, merged_history)
-            elif self._needs_clarification(route):
+            elif self._needs_clarification(route) and not contextual_follow_up:
                 answer = self._clarification_answer(effective_query)
             elif route.mode == "chat":
                 answer = self._small_talk_answer(effective_query)
@@ -123,6 +128,9 @@ class ChatService:
         yield self._stream_event("session", {"session_id": sid})
 
         clarification = self._resolve_clarification_choice(merged_history, query)
+        contextual_follow_up = (
+            not clarification and context_service.is_contextual_follow_up(query, merged_history)
+        )
         effective_query = query if clarification else context_service.resolve_query(sid, query, merged_history)
         route = classify_query(effective_query)
         full_answer = ""
@@ -134,7 +142,7 @@ class ChatService:
                     full_answer += chunk
                     sources = chunk_sources
                     yield self._stream_event("delta", {"content": chunk})
-            elif self._needs_clarification(route):
+            elif self._needs_clarification(route) and not contextual_follow_up:
                 full_answer = self._clarification_answer(effective_query)
                 yield self._stream_event("status", {"message": "需要确认你的意图..."})
                 yield self._stream_event("delta", {"content": full_answer})
@@ -189,16 +197,24 @@ class ChatService:
                 return answer
         except Exception as exc:
             logger.warning("[clarification] LLM clarification failed: %s", exc)
+        topic = self._clarification_topic(query)
         return (
-            "我还不确定你想让我按哪种方式处理。请你确认一下：\n"
-            "1. 查询相关制度、规则或流程\n"
-            "2. 帮你生成申请草稿或流程方案\n"
-            "3. 做风险校验或合规检查\n\n"
+            f"你想让我按哪种方式处理“{topic}”？\n"
+            f"1. 查询“{topic}”相关制度依据、办理规则或流程\n"
+            f"2. 基于“{topic}”生成流程方案、申请说明或草稿\n"
+            f"3. 对“{topic}”做风险校验、合规检查或注意事项梳理\n\n"
             "你可以直接回复选项编号，或者补充一句你的目标。"
         )
 
     def _valid_clarification_answer(self, answer: str) -> bool:
-        return all(marker in answer for marker in ["1.", "2.", "3."])
+        return all(marker in answer for marker in ["1.", "2.", "3."]) and len(answer.strip()) <= 220
+
+    def _clarification_topic(self, query: str) -> str:
+        topic = " ".join(query.strip().split())
+        for prefix in ["请问", "我想", "帮我", "需要", "查询", "生成", "做一下"]:
+            topic = topic.replace(prefix, "")
+        topic = topic.strip("，。？！；:： ")
+        return topic[:28] or "这个事项"
 
     def _resolve_clarification_choice(self, history: List[ChatMessage], query: str):
         choice = self._parse_clarification_choice(query)

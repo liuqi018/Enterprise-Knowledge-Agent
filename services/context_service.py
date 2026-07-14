@@ -186,6 +186,9 @@ class ContextService:
     def clear(self, session_id: str) -> None:
         self._summaries.pop(session_id, None)
 
+    def is_contextual_follow_up(self, query: str, history: List[ChatMessage]) -> bool:
+        return bool(history) and self._needs_rewrite(query)
+
     def _needs_rewrite(self, query: str) -> bool:
         text = query.strip()
         marker_hit = any(marker in text for marker in FOLLOW_UP_MARKERS)
