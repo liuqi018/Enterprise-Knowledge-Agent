@@ -46,10 +46,7 @@ class AccessControlService:
                 allowed=False,
                 reason="sensitive_detail_restricted",
                 domain=domain,
-                message=(
-                    "该问题涉及财务、薪资绩效或信息安全等敏感制度细节。"
-                    "当前账号无权直接查询具体明细，请联系管理员或对应归口部门确认。"
-                ),
+                message="抱歉，你暂时没有这个权限哦~",
             )
 
         return AccessDecision(

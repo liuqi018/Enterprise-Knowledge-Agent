@@ -122,7 +122,7 @@ def knowledge_task(task_id: str, current_user: User = Depends(get_current_user))
 def rag_ask(request: RagRequest, current_user: User = Depends(get_current_user)):
     decision = access_control_service.can_access_query(request.query, current_user.role)
     if not decision.allowed:
-        raise HTTPException(status_code=403, detail=decision.message)
+        return ApiResponse(data={"answer": decision.message, "sources": []})
     try:
         return ApiResponse(data=rag_service.answer(request.query, top_k=request.top_k))
     except Exception as exc:
