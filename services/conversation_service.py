@@ -62,6 +62,28 @@ class ConversationService:
             .all()
         )
 
+    def get_summary(self, db: Session, user_id: int, session_id: str) -> str:
+        conversation = (
+            db.query(Conversation)
+            .filter(Conversation.session_id == session_id, Conversation.user_id == user_id)
+            .first()
+        )
+        return (conversation.summary or "") if conversation else ""
+
+    def update_summary(self, db: Session, user_id: int, session_id: str, summary: str) -> None:
+        conversation = (
+            db.query(Conversation)
+            .filter(Conversation.session_id == session_id, Conversation.user_id == user_id)
+            .first()
+        )
+        if not conversation:
+            return
+        conversation.summary = summary or ""
+        db.commit()
+
+    def clear_summary(self, db: Session, user_id: int, session_id: str) -> None:
+        self.update_summary(db, user_id, session_id, "")
+
     def clear(self, db: Session, user_id: int, session_id: str) -> bool:
         conversation = (
             db.query(Conversation)

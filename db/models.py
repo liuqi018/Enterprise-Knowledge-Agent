@@ -46,6 +46,7 @@ class Conversation(Base):
     session_id = Column(String(64), unique=True, index=True, nullable=False)
     user_id = Column(Integer, index=True, nullable=False)
     title = Column(String(128), default="新会话", nullable=False)
+    summary = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

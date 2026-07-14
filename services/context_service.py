@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import PromptTemplate
@@ -122,7 +122,13 @@ class ContextService:
         self.rewrite_chain = PromptTemplate.from_template(CONTEXT_REWRITE_PROMPT) | chat_model | StrOutputParser()
         self.summary_chain = PromptTemplate.from_template(CONTEXT_SUMMARY_PROMPT) | chat_model | StrOutputParser()
 
-    def resolve_query(self, session_id: str, query: str, history: List[ChatMessage]) -> str:
+    def resolve_query(
+        self,
+        session_id: str,
+        query: str,
+        history: List[ChatMessage],
+        summary: Optional[str] = None,
+    ) -> str:
         if not settings.CONTEXT_REWRITE_ENABLED:
             return query
         if not history or not self._needs_rewrite(query):
@@ -131,7 +137,7 @@ class ContextService:
         if self._force_merge_follow_up(query):
             return self._fallback_rewrite(query, history)
 
-        summary = self.get_summary(session_id)
+        summary = self.get_summary(session_id, summary)
         history_text = self._format_history(history, limit=settings.CONTEXT_RECENT_MESSAGES)
         try:
             rewritten = self.rewrite_chain.invoke(
@@ -152,17 +158,18 @@ class ContextService:
         history: List[ChatMessage],
         user_query: str,
         assistant_answer: str,
-    ) -> None:
+        old_summary: Optional[str] = None,
+    ) -> Optional[str]:
         if not settings.CONTEXT_SUMMARY_ENABLED or not session_id:
-            return
+            return None
         recent = list(history or []) + [
             ChatMessage(role="user", content=user_query),
             ChatMessage(role="assistant", content=assistant_answer[:1200]),
         ]
         if len(recent) < settings.CONTEXT_SUMMARY_TRIGGER_MESSAGES:
-            return
+            return None
 
-        old_summary = self.get_summary(session_id)
+        old_summary = self.get_summary(session_id, old_summary)
         history_text = self._format_history(recent, limit=settings.CONTEXT_RECENT_MESSAGES)
         try:
             summary = self.summary_chain.invoke(
@@ -172,15 +179,21 @@ class ContextService:
             if summary:
                 self._summaries[session_id] = summary
                 logger.info("[Context] summary updated session=%s chars=%s", session_id, len(summary))
-                return
+                return summary
         except Exception as exc:
             logger.warning("[Context] summary failed, fallback to lightweight summary: %s", exc)
 
         fallback = self._fallback_summary(old_summary, user_query, assistant_answer)
         if fallback:
             self._summaries[session_id] = fallback
+            return fallback
+        return None
 
-    def get_summary(self, session_id: str) -> str:
+    def get_summary(self, session_id: str, persisted_summary: Optional[str] = None) -> str:
+        if persisted_summary is not None:
+            if persisted_summary:
+                self._summaries[session_id] = persisted_summary
+            return persisted_summary or ""
         return self._summaries.get(session_id, "")
 
     def clear(self, session_id: str) -> None:

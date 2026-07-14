@@ -82,10 +82,11 @@ class ChatService:
         self._append(db, user_id, sid, "user", query)
 
         clarification = self._resolve_clarification_choice(merged_history, query)
+        summary = self._summary(db, user_id, sid)
         contextual_follow_up = (
             not clarification and context_service.is_contextual_follow_up(query, merged_history)
         )
-        effective_query = query if clarification else context_service.resolve_query(sid, query, merged_history)
+        effective_query = query if clarification else context_service.resolve_query(sid, query, merged_history, summary)
         route = classify_query(effective_query)
         sources = []
         try:
@@ -109,7 +110,8 @@ class ChatService:
             sources = rag_response.sources
 
         self._append(db, user_id, sid, "assistant", answer)
-        context_service.update_summary(sid, merged_history, query, answer)
+        new_summary = context_service.update_summary(sid, merged_history, query, answer, old_summary=summary)
+        self._update_summary(db, user_id, sid, new_summary)
         return ChatResponse(session_id=sid, answer=answer, sources=sources)
 
     def stream_answer(
@@ -128,10 +130,11 @@ class ChatService:
         yield self._stream_event("session", {"session_id": sid})
 
         clarification = self._resolve_clarification_choice(merged_history, query)
+        summary = self._summary(db, user_id, sid)
         contextual_follow_up = (
             not clarification and context_service.is_contextual_follow_up(query, merged_history)
         )
-        effective_query = query if clarification else context_service.resolve_query(sid, query, merged_history)
+        effective_query = query if clarification else context_service.resolve_query(sid, query, merged_history, summary)
         route = classify_query(effective_query)
         full_answer = ""
         sources = []
@@ -175,7 +178,14 @@ class ChatService:
             yield self._stream_event("delta", {"content": full_answer})
 
         self._append(db, user_id, sid, "assistant", full_answer.strip())
-        context_service.update_summary(sid, merged_history, query, full_answer.strip())
+        new_summary = context_service.update_summary(
+            sid,
+            merged_history,
+            query,
+            full_answer.strip(),
+            old_summary=summary,
+        )
+        self._update_summary(db, user_id, sid, new_summary)
         yield self._stream_event("done", {"session_id": sid, "sources": sources})
 
     def _history_payload(self, history: List[ChatMessage]) -> List[dict]:
@@ -305,6 +315,17 @@ class ChatService:
             conversation_service.append(db, user_id, session_id, role, content)
             return
         session_service.append(session_id, role, content)
+
+    def _summary(self, db: Session, user_id: int, session_id: str) -> str:
+        if db and user_id:
+            return conversation_service.get_summary(db, user_id, session_id)
+        return context_service.get_summary(session_id)
+
+    def _update_summary(self, db: Session, user_id: int, session_id: str, summary: str) -> None:
+        if not summary:
+            return
+        if db and user_id:
+            conversation_service.update_summary(db, user_id, session_id, summary)
 
     def clear_context(self, session_id: str) -> None:
         context_service.clear(session_id)
