@@ -1,6 +1,7 @@
 const state = {
   sessionId: localStorage.getItem("enterprise-agent-session") || null,
   token: localStorage.getItem("enterprise-agent-token") || null,
+  role: localStorage.getItem("enterprise-agent-role") || "user",
   authMode: "login",
   isBusy: false,
 };
@@ -24,6 +25,7 @@ const sendBtn = document.querySelector("#sendBtn");
 const ingestBtn = document.querySelector("#ingestBtn");
 const forceIngestBtn = document.querySelector("#forceIngestBtn");
 const ingestResult = document.querySelector("#ingestResult");
+const knowledgePanel = document.querySelector("#knowledgePanel");
 const serviceStatus = document.querySelector("#serviceStatus");
 const backend = document.querySelector("#backend");
 const docCount = document.querySelector("#docCount");
@@ -56,7 +58,7 @@ async function ensureAuthenticated() {
   }
   try {
     const result = await api("/auth/me");
-    currentUser.textContent = `${result.data.username} / ${roleLabel(result.data.role)}`;
+    setCurrentUser(result.data);
     hideLogin();
     await refreshStats();
     await loadConversations();
@@ -76,9 +78,12 @@ function hideLogin() {
 function logout() {
   state.token = null;
   state.sessionId = null;
+  state.role = "user";
   localStorage.removeItem("enterprise-agent-token");
   localStorage.removeItem("enterprise-agent-session");
+  localStorage.removeItem("enterprise-agent-role");
   currentUser.textContent = "未登录";
+  applyRolePermissions();
   showLogin();
 }
 
@@ -127,9 +132,14 @@ async function refreshStats() {
   try {
     await api("/health");
     serviceStatus.textContent = "在线";
-    const result = await api("/knowledge/stats");
-    backend.textContent = result.data.backend;
-    docCount.textContent = result.data.document_count;
+    if (isAdmin()) {
+      const result = await api("/knowledge/stats");
+      backend.textContent = result.data.backend;
+      docCount.textContent = result.data.document_count;
+    } else {
+      backend.textContent = "仅管理员可见";
+      docCount.textContent = "仅管理员可见";
+    }
   } catch (error) {
     serviceStatus.textContent = "异常";
     backend.textContent = "-";
@@ -275,7 +285,7 @@ loginForm.addEventListener("submit", async (event) => {
     const payload = await result.json();
     state.token = payload.data.access_token;
     localStorage.setItem("enterprise-agent-token", state.token);
-    currentUser.textContent = `${payload.data.username} / ${roleLabel(payload.data.role)}`;
+    setCurrentUser(payload.data);
     hideLogin();
     await refreshStats();
     await loadConversations();
@@ -297,6 +307,29 @@ switchAuthModeBtn.addEventListener("click", () => {
 
 function roleLabel(role) {
   return role === "admin" ? "管理员" : "用户";
+}
+
+function isAdmin() {
+  return state.role === "admin";
+}
+
+function setCurrentUser(user) {
+  state.role = user.role || "user";
+  localStorage.setItem("enterprise-agent-role", state.role);
+  currentUser.textContent = `${user.username} / ${roleLabel(state.role)}`;
+  applyRolePermissions();
+}
+
+function applyRolePermissions() {
+  const admin = isAdmin();
+  if (knowledgePanel) {
+    knowledgePanel.hidden = !admin;
+  }
+  ingestBtn.disabled = !admin;
+  forceIngestBtn.disabled = !admin;
+  if (!admin) {
+    ingestResult.textContent = "";
+  }
 }
 
 async function readChatStream(response, bubble) {
@@ -386,4 +419,5 @@ document.querySelectorAll("[data-example]").forEach((button) => {
 ingestBtn.addEventListener("click", () => ingestKnowledge(false));
 forceIngestBtn.addEventListener("click", () => ingestKnowledge(true));
 
+applyRolePermissions();
 ensureAuthenticated();
