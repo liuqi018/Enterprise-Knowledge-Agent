@@ -11,6 +11,7 @@ from AIRAGAgent.config.settings import settings
 from AIRAGAgent.model.factory import chat_model
 from AIRAGAgent.rag.rag_service import RagSummarizeService
 from AIRAGAgent.schemas import ChatMessage, ChatResponse
+from AIRAGAgent.services.access_control_service import access_control_service
 from AIRAGAgent.services.conversation_service import conversation_service
 from AIRAGAgent.services.context_service import context_service
 from AIRAGAgent.services.query_classifier import classify_query, needs_clarification
@@ -75,6 +76,7 @@ class ChatService:
         history: List[ChatMessage] = None,
         tenant_id: str = "default",
         user_id: int = 0,
+        user_role: str = "user",
         db: Session = None,
     ) -> ChatResponse:
         sid = self._get_session_id(db, user_id, session_id, query)
@@ -87,10 +89,13 @@ class ChatService:
             not clarification and context_service.is_contextual_follow_up(query, merged_history)
         )
         effective_query = query if clarification else context_service.resolve_query(sid, query, merged_history, summary)
+        access_decision = access_control_service.can_access_query(effective_query, user_role)
         route = classify_query(effective_query)
         sources = []
         try:
-            if clarification:
+            if not access_decision.allowed:
+                answer = access_decision.message
+            elif clarification:
                 answer, sources = self._answer_clarification_choice(clarification, tenant_id, merged_history)
             elif self._needs_clarification(route) and not contextual_follow_up:
                 answer = self._clarification_answer(effective_query)
@@ -122,6 +127,7 @@ class ChatService:
         history: List[ChatMessage] = None,
         tenant_id: str = "default",
         user_id: int = 0,
+        user_role: str = "user",
         db: Session = None,
     ) -> Iterator[str]:
         sid = self._get_session_id(db, user_id, session_id, query)
@@ -135,11 +141,16 @@ class ChatService:
             not clarification and context_service.is_contextual_follow_up(query, merged_history)
         )
         effective_query = query if clarification else context_service.resolve_query(sid, query, merged_history, summary)
+        access_decision = access_control_service.can_access_query(effective_query, user_role)
         route = classify_query(effective_query)
         full_answer = ""
         sources = []
         try:
-            if clarification:
+            if not access_decision.allowed:
+                full_answer = access_decision.message
+                yield self._stream_event("status", {"message": "当前问题涉及敏感制度权限..."})
+                yield self._stream_event("delta", {"content": full_answer})
+            elif clarification:
                 yield self._stream_event("status", {"message": "已确认处理方式，正在继续处理..."})
                 for chunk, chunk_sources in self._stream_clarification_choice(clarification, merged_history, tenant_id):
                     full_answer += chunk

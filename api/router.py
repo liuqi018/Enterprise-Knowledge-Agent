@@ -9,6 +9,7 @@ from AIRAGAgent.knowledge.service import KnowledgeBaseService
 from AIRAGAgent.rag.rag_service import RagSummarizeService
 from AIRAGAgent.schemas import ApiResponse, ChatRequest, ConversationResponse, KnowledgeIngestRequest, LoginRequest, LoginResponse, MessageResponse, RagRequest, RegisterRequest, UserResponse
 from AIRAGAgent.services.chat_service import chat_service
+from AIRAGAgent.services.access_control_service import access_control_service
 from AIRAGAgent.services.auth_service import authenticate_user, create_access_token, register_user
 from AIRAGAgent.services.health_service import health_check
 from AIRAGAgent.services.conversation_service import conversation_service
@@ -74,6 +75,7 @@ def me(current_user: User = Depends(get_current_user)):
 
 @router.get("/knowledge/stats", response_model=ApiResponse)
 def knowledge_stats(current_user: User = Depends(get_current_user)):
+    require_admin(current_user)
     try:
         return ApiResponse(data=knowledge_service.stats())
     except Exception as exc:
@@ -109,6 +111,7 @@ def ingest_knowledge_async(request: KnowledgeIngestRequest, current_user: User =
 
 @router.get("/knowledge/tasks/{task_id}", response_model=ApiResponse)
 def knowledge_task(task_id: str, current_user: User = Depends(get_current_user)):
+    require_admin(current_user)
     task = knowledge_service.get_task(task_id, user_id=current_user.id, tenant_id="global")
     if not task:
         raise HTTPException(status_code=404, detail="task not found")
@@ -117,6 +120,9 @@ def knowledge_task(task_id: str, current_user: User = Depends(get_current_user))
 
 @router.post("/rag/ask", response_model=ApiResponse)
 def rag_ask(request: RagRequest, current_user: User = Depends(get_current_user)):
+    decision = access_control_service.can_access_query(request.query, current_user.role)
+    if not decision.allowed:
+        raise HTTPException(status_code=403, detail=decision.message)
     try:
         return ApiResponse(data=rag_service.answer(request.query, top_k=request.top_k))
     except Exception as exc:
@@ -134,6 +140,7 @@ def chat(request: ChatRequest, current_user: User = Depends(get_current_user), d
             history=request.history,
             tenant_id=current_user.tenant_id,
             user_id=current_user.id,
+            user_role=current_user.role,
             db=db,
         )
         return ApiResponse(data=response)
@@ -153,6 +160,7 @@ def chat_stream(request: ChatRequest, current_user: User = Depends(get_current_u
                 history=request.history,
                 tenant_id=current_user.tenant_id,
                 user_id=current_user.id,
+                user_role=current_user.role,
                 db=db,
             ),
             media_type="application/x-ndjson; charset=utf-8",
