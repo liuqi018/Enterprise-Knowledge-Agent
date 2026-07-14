@@ -59,4 +59,8 @@ class Message(Base):
     user_id = Column(Integer, index=True, nullable=False)
     role = Column(String(16), nullable=False)
     content = Column(Text, nullable=False)
+    status = Column(String(16), default="success", nullable=False)
+    error_message = Column(Text, nullable=True)
+    retryable = Column(Boolean, default=False, nullable=False)
+    parent_message_id = Column(Integer, nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

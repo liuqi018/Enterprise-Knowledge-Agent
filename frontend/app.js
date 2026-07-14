@@ -4,6 +4,7 @@ const state = {
   role: localStorage.getItem("enterprise-agent-role") || "user",
   authMode: "login",
   isBusy: false,
+  isNewConversation: !localStorage.getItem("enterprise-agent-session"),
 };
 
 const loginOverlay = document.querySelector("#loginOverlay");
@@ -78,6 +79,7 @@ function hideLogin() {
 function logout() {
   state.token = null;
   state.sessionId = null;
+  state.isNewConversation = true;
   state.role = "user";
   localStorage.removeItem("enterprise-agent-token");
   localStorage.removeItem("enterprise-agent-session");
@@ -87,9 +89,15 @@ function logout() {
   showLogin();
 }
 
-function addMessage(role, content, sources = []) {
+function addMessage(role, content, sources = [], meta = {}) {
   const article = document.createElement("article");
   article.className = `message ${role}`;
+  if (meta.status) {
+    article.dataset.status = meta.status;
+  }
+  if (meta.id) {
+    article.dataset.messageId = meta.id;
+  }
 
   const avatar = document.createElement("div");
   avatar.className = "avatar";
@@ -106,11 +114,29 @@ function addMessage(role, content, sources = []) {
     bubble.appendChild(sourceBox);
   }
 
+  if (meta.status === "failed" && meta.retryable && meta.id) {
+    appendRetryAction(bubble, meta.id);
+  }
+
   article.appendChild(avatar);
   article.appendChild(bubble);
   chatList.appendChild(article);
   chatList.scrollTop = chatList.scrollHeight;
   return bubble;
+}
+
+function appendRetryAction(bubble, messageId) {
+  const actions = document.createElement("div");
+  actions.className = "message-actions";
+
+  const retryBtn = document.createElement("button");
+  retryBtn.type = "button";
+  retryBtn.className = "retry-btn";
+  retryBtn.textContent = "重试";
+  retryBtn.addEventListener("click", () => retryMessage(messageId, bubble, retryBtn));
+
+  actions.appendChild(retryBtn);
+  bubble.appendChild(actions);
 }
 
 function setBubbleStatus(bubble, message) {
@@ -183,17 +209,29 @@ async function loadConversations() {
 async function openConversation(sessionId) {
   const result = await api(`/conversations/${sessionId}/messages`);
   state.sessionId = sessionId;
+  state.isNewConversation = false;
   localStorage.setItem("enterprise-agent-session", sessionId);
   chatList.innerHTML = "";
   if (!result.data.length) {
     renderWelcome();
     return;
   }
-  result.data.forEach((message) => addMessage(message.role, message.content));
+  result.data.forEach((message) => {
+    const content = message.status === "pending" && !message.content
+      ? "上次生成未完成，请重新提问或稍后刷新。"
+      : message.content;
+    addMessage(message.role, content, [], {
+      id: message.id,
+      status: message.status,
+      retryable: message.retryable,
+      errorMessage: message.error_message,
+    });
+  });
 }
 
 function newConversation() {
   state.sessionId = null;
+  state.isNewConversation = true;
   localStorage.removeItem("enterprise-agent-session");
   chatList.innerHTML = "";
   renderWelcome();
@@ -234,6 +272,7 @@ chatForm.addEventListener("submit", async (event) => {
   const pendingBubble = addMessage("assistant", "");
   setBubbleStatus(pendingBubble, "正在检索知识库并分析问题...");
   setBusy(true);
+  const outboundSessionId = state.isNewConversation ? null : state.sessionId;
 
   try {
     const response = await fetch("/api/chat/stream", {
@@ -241,7 +280,7 @@ chatForm.addEventListener("submit", async (event) => {
       headers: { "Content-Type": "application/json", ...authHeader() },
       body: JSON.stringify({
         query,
-        session_id: state.sessionId,
+        session_id: outboundSessionId,
         use_agent: agentMode.checked,
       }),
     });
@@ -337,6 +376,7 @@ async function readChatStream(response, bubble) {
   const decoder = new TextDecoder("utf-8");
   let buffer = "";
   let answer = "";
+  let assistantMessageId = null;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -355,6 +395,11 @@ async function readChatStream(response, bubble) {
       const payload = JSON.parse(line);
       if (payload.event === "session") {
         state.sessionId = payload.data.session_id;
+        state.isNewConversation = false;
+        assistantMessageId = payload.data.assistant_message_id || assistantMessageId;
+        if (assistantMessageId) {
+          bubble.closest(".message").dataset.messageId = assistantMessageId;
+        }
         localStorage.setItem("enterprise-agent-session", state.sessionId);
       }
       if (payload.event === "status") {
@@ -373,7 +418,20 @@ async function readChatStream(response, bubble) {
         chatList.scrollTop = chatList.scrollHeight;
       }
       if (payload.event === "done") {
+        assistantMessageId = payload.data.assistant_message_id || assistantMessageId;
         appendSources(bubble, payload.data.sources || []);
+      }
+      if (payload.event === "error") {
+        clearBubbleStatus(bubble);
+        bubble.textContent = payload.data.message || "生成失败，请稍后重试。";
+        const failedId = payload.data.assistant_message_id || assistantMessageId;
+        const article = bubble.closest(".message");
+        article.dataset.status = "failed";
+        if (failedId && payload.data.retryable !== false) {
+          article.dataset.messageId = failedId;
+          appendRetryAction(bubble, failedId);
+        }
+        return;
       }
     }
   }
@@ -381,6 +439,34 @@ async function readChatStream(response, bubble) {
   if (!answer.trim()) {
     clearBubbleStatus(bubble);
     bubble.textContent = "没有返回内容。";
+  }
+}
+
+async function retryMessage(messageId, bubble, retryBtn) {
+  if (state.isBusy) {
+    return;
+  }
+  setBusy(true);
+  retryBtn.disabled = true;
+  bubble.textContent = "正在重试生成回答...";
+  bubble.classList.add("thinking");
+
+  try {
+    const result = await api(`/messages/${messageId}/retry`, { method: "POST" });
+    clearBubbleStatus(bubble);
+    bubble.textContent = result.data.answer || "没有返回内容。";
+    appendSources(bubble, result.data.sources || []);
+    const article = bubble.closest(".message");
+    article.dataset.status = "success";
+    article.dataset.messageId = result.data.assistant_message_id || messageId;
+    await loadConversations();
+  } catch (error) {
+    clearBubbleStatus(bubble);
+    bubble.textContent = `重试失败：${error.message}`;
+    appendRetryAction(bubble, messageId);
+  } finally {
+    setBusy(false);
+    queryInput.focus();
   }
 }
 

@@ -68,6 +68,7 @@ class Settings:
     CONTEXT_SUMMARY_ENABLED = os.getenv("CONTEXT_SUMMARY_ENABLED", "true").lower() == "true"
     CONTEXT_SUMMARY_TRIGGER_MESSAGES = int(os.getenv("CONTEXT_SUMMARY_TRIGGER_MESSAGES", "6"))
     CONTEXT_RECENT_MESSAGES = int(os.getenv("CONTEXT_RECENT_MESSAGES", "6"))
+    ACCESS_CONTROL_CONFIG_PATH = os.getenv("ACCESS_CONTROL_CONFIG_PATH", "config/access_control.yml")
 
     REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
     REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))

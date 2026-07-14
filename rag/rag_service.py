@@ -18,6 +18,7 @@ from AIRAGAgent.schemas import RagResponse
 from AIRAGAgent.services.query_classifier import classify_query
 from AIRAGAgent.utils.logger_handler import logger
 from AIRAGAgent.utils.path_tool import get_abs_path
+from AIRAGAgent.utils.trace import elapsed_ms, log_trace, now_ms, short_text
 
 
 ANSWER_PROMPT = """你是企业知识智能体。只能基于“制度资料”回答用户问题。
@@ -180,11 +181,21 @@ class RagSummarizeService:
             return self.policy_rule_rewrite(query)
 
     def retrieve_documents(self, query: str, top_k: int = None, tenant_id: str = None) -> List[Document]:
+        retrieve_start = now_ms()
         self.ensure_vector_store_ready()
         tenant_id = tenant_id or "global"
         intent = self.classify_intent(query)
         metadata_filter = self.build_metadata_filter(query, intent)
         recalled_lists: List[Tuple[str, List[Document]]] = []
+        log_trace(
+            logger,
+            "rag_retrieve_start",
+            tenant_id=tenant_id,
+            intent=intent,
+            top_k=top_k,
+            metadata_filter=metadata_filter,
+            query=short_text(query),
+        )
 
         if intent == "direct_policy":
             target_top_k = top_k or self.answer_top_k(intent)
@@ -201,6 +212,18 @@ class RagSummarizeService:
                 len(selected),
                 len(compressed),
                 rank_mode,
+            )
+            log_trace(
+                logger,
+                "rag_retrieve_done",
+                intent=intent,
+                queries=1,
+                recall_lists=1,
+                fused=len(selected),
+                filtered=len(selected),
+                selected=len(compressed),
+                rank_mode=rank_mode,
+                elapsed_ms=elapsed_ms(retrieve_start),
             )
             return compressed
 
@@ -245,6 +268,19 @@ class RagSummarizeService:
             len(selected),
             rank_mode,
         )
+        log_trace(
+            logger,
+            "rag_retrieve_done",
+            intent=intent,
+            queries=len(queries),
+            metadata_filter=metadata_filter,
+            recall_lists=len(recalled_lists),
+            fused=len(fused),
+            filtered=len(filtered),
+            selected=len(compressed),
+            rank_mode=rank_mode,
+            elapsed_ms=elapsed_ms(retrieve_start),
+        )
         return compressed
 
     def answer_top_k(self, intent: str) -> int:
@@ -260,9 +296,19 @@ class RagSummarizeService:
         k: int,
         metadata_filter: Optional[Dict[str, str]] = None,
     ) -> List[Document]:
+        start = now_ms()
         docs = self.vector_store.similarity_search(query, k=k, metadata_filter=metadata_filter)
         for rank, doc in enumerate(docs, start=1):
             doc.metadata = {**doc.metadata, "recall_route": "vector", "vector_rank": rank}
+        log_trace(
+            logger,
+            "rag_vector_recall",
+            k=k,
+            results=len(docs),
+            metadata_filter=metadata_filter,
+            elapsed_ms=elapsed_ms(start),
+            query=short_text(query),
+        )
         return docs
 
     def bm25_recall(
@@ -272,6 +318,7 @@ class RagSummarizeService:
         metadata_filter: Optional[Dict[str, str]] = None,
         tenant_id: str = "default",
     ) -> List[Document]:
+        start = now_ms()
         index_tenant = self._bm25_tenant_for_query(tenant_id)
         index = self.load_bm25_index(index_tenant)
         documents = index.get("documents", [])
@@ -284,10 +331,32 @@ class RagSummarizeService:
         else:
             candidate_indexes = list(range(len(documents)))
         if not candidate_indexes:
+            log_trace(
+                logger,
+                "rag_bm25_recall",
+                tenant_id=tenant_id,
+                index_tenant=index_tenant,
+                k=k,
+                results=0,
+                reason="no_candidates",
+                elapsed_ms=elapsed_ms(start),
+                query=short_text(query),
+            )
             return []
 
         query_terms = self.tokenize(query)
         if not query_terms:
+            log_trace(
+                logger,
+                "rag_bm25_recall",
+                tenant_id=tenant_id,
+                index_tenant=index_tenant,
+                k=k,
+                results=0,
+                reason="empty_terms",
+                elapsed_ms=elapsed_ms(start),
+                query=short_text(query),
+            )
             return []
 
         tokenized_docs = index.get("tokenized_docs", [])
@@ -314,6 +383,19 @@ class RagSummarizeService:
                 "bm25_score": round(score, 4),
                 },
             ))
+        log_trace(
+            logger,
+            "rag_bm25_recall",
+            tenant_id=tenant_id,
+            index_tenant=index_tenant,
+            k=k,
+            candidates=len(candidate_indexes),
+            scored=len(scores),
+            results=len(result),
+            metadata_filter=metadata_filter,
+            elapsed_ms=elapsed_ms(start),
+            query=short_text(query),
+        )
         return result
 
     def _bm25_tenant_for_query(self, tenant_id: str) -> str:
@@ -866,21 +948,34 @@ class RagSummarizeService:
 
     def generate_answer(self, query: str, documents: List[Document]) -> str:
         intent = self.intent_from_documents(documents)
-        return self.answer_chain_for_intent(intent).invoke(
+        start = now_ms()
+        answer = self.answer_chain_for_intent(intent).invoke(
             {
                 "question": query,
                 "context": self.format_context(documents),
             }
         )
+        log_trace(
+            logger,
+            "rag_answer_generated",
+            intent=intent,
+            documents=len(documents),
+            answer_chars=len(answer or ""),
+            elapsed_ms=elapsed_ms(start),
+        )
+        return answer
 
     def stream_answer(self, query: str, top_k: int = None, tenant_id: str = None):
+        total_start = now_ms()
         documents = self.retrieve_documents(query, top_k=top_k, tenant_id=tenant_id)
         if not documents:
+            log_trace(logger, "rag_stream_done", documents=0, elapsed_ms=elapsed_ms(total_start))
             yield "知识库中没有明确依据。", []
             return
 
         sources = self.sources(documents)
         intent = self.intent_from_documents(documents)
+        first_chunk = True
         for chunk in self.answer_chain_for_intent(intent).stream(
             {
                 "question": query,
@@ -888,15 +983,43 @@ class RagSummarizeService:
             }
         ):
             if chunk:
+                if first_chunk:
+                    log_trace(
+                        logger,
+                        "rag_stream_first_chunk",
+                        intent=intent,
+                        documents=len(documents),
+                        elapsed_ms=elapsed_ms(total_start),
+                    )
+                    first_chunk = False
                 yield str(chunk), sources
+        log_trace(
+            logger,
+            "rag_stream_done",
+            intent=intent,
+            documents=len(documents),
+            sources_count=len(sources),
+            elapsed_ms=elapsed_ms(total_start),
+        )
 
     def answer(self, query: str, top_k: int = None, tenant_id: str = None) -> RagResponse:
+        total_start = now_ms()
         documents = self.retrieve_documents(query, top_k=top_k, tenant_id=tenant_id)
         if not documents:
+            log_trace(logger, "rag_answer_done", documents=0, elapsed_ms=elapsed_ms(total_start))
             return RagResponse(answer="知识库中没有明确依据。", sources=[])
 
         answer = self.generate_answer(query, documents)
-        return RagResponse(answer=answer, sources=self.sources(documents))
+        sources = self.sources(documents)
+        log_trace(
+            logger,
+            "rag_answer_done",
+            documents=len(documents),
+            sources_count=len(sources),
+            answer_chars=len(answer or ""),
+            elapsed_ms=elapsed_ms(total_start),
+        )
+        return RagResponse(answer=answer, sources=sources)
 
 
 if __name__ == "__main__":

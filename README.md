@@ -292,6 +292,30 @@ IT 变更发布需要经过哪些步骤？
 信息系统用户访问权限如何申请和管理？
 ```
 
+
+## 权限控制
+
+项目提供轻量级、配置化的敏感制度域访问控制，配置文件位于：
+
+```text
+config/access_control.yml
+```
+
+核心策略：
+- `allow`：允许访问该制度域的所有问题。
+- `general_only`：允许查询泛化制度、流程和要求，但限制金额、明细、名单、账号、密码等敏感细节。
+- `deny`：限制访问该制度域。
+
+默认配置中，`admin` 可访问全部内容；普通 `user` 对财务、薪酬绩效、信息安全域采用 `general_only` 策略。可以通过 `ACCESS_CONTROL_CONFIG_PATH` 指定自定义配置文件。
+
+快速验证：
+
+```powershell
+python scripts\check_access_control.py --role user
+python scripts\check_access_control.py --role admin
+python scripts\check_access_control.py --role finance --query "财务报销金额标准是多少？"
+```
+
 ## 效果评测
 
 项目提供一套 160 条制造企业制度问答评测集，覆盖生产、质量、财务、报销、采购、仓储、人事、考勤、薪酬绩效、研发、IT 服务和信息安全等业务域。

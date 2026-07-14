@@ -207,6 +207,8 @@ class ContextService:
         marker_hit = any(marker in text for marker in FOLLOW_UP_MARKERS)
         force_hit = any(marker in text for marker in FORCE_MERGE_MARKERS)
         business_hit = any(keyword in text for keyword in BUSINESS_KEYWORDS)
+        if business_hit:
+            return False
         if len(text) <= 4 and not marker_hit and not force_hit:
             return False
         if force_hit:
@@ -219,6 +221,8 @@ class ContextService:
 
     def _force_merge_follow_up(self, query: str) -> bool:
         text = query.strip()
+        if self._has_business_keyword(text):
+            return False
         return len(text) <= 24 and any(marker in text for marker in FORCE_MERGE_MARKERS)
 
     def _fallback_rewrite(self, query: str, history: List[ChatMessage]) -> str:

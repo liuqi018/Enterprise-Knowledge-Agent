@@ -25,6 +25,7 @@ class ChatResponse(BaseModel):
     session_id: str
     answer: str
     sources: List[Dict[str, Any]] = Field(default_factory=list)
+    assistant_message_id: Optional[int] = None
 
 
 class ConversationResponse(BaseModel):
@@ -35,8 +36,13 @@ class ConversationResponse(BaseModel):
 
 
 class MessageResponse(BaseModel):
+    id: int
     role: str
     content: str
+    status: str = "success"
+    retryable: bool = False
+    error_message: Optional[str] = None
+    parent_message_id: Optional[int] = None
     created_at: str
 
 

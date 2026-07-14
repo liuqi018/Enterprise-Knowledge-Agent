@@ -14,6 +14,7 @@ from AIRAGAgent.services.auth_service import authenticate_user, create_access_to
 from AIRAGAgent.services.health_service import health_check
 from AIRAGAgent.services.conversation_service import conversation_service
 from AIRAGAgent.utils.logger_handler import logger
+from AIRAGAgent.utils.trace import elapsed_ms, log_trace, new_trace_id, now_ms, short_text, trace_scope
 
 router = APIRouter(prefix="/api")
 knowledge_service = KnowledgeBaseService()
@@ -120,39 +121,91 @@ def knowledge_task(task_id: str, current_user: User = Depends(get_current_user))
 
 @router.post("/rag/ask", response_model=ApiResponse)
 def rag_ask(request: RagRequest, current_user: User = Depends(get_current_user)):
-    decision = access_control_service.can_access_query(request.query, current_user.role)
-    if not decision.allowed:
-        return ApiResponse(data={"answer": decision.message, "sources": []})
-    try:
-        return ApiResponse(data=rag_service.answer(request.query, top_k=request.top_k))
-    except Exception as exc:
-        logger.error("[api] rag ask failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+    with trace_scope(new_trace_id()):
+        start = now_ms()
+        log_trace(
+            logger,
+            "api_request",
+            endpoint="/api/rag/ask",
+            user=current_user.username,
+            role=current_user.role,
+            tenant_id=current_user.tenant_id,
+            query=short_text(request.query),
+        )
+        decision = access_control_service.can_access_query(request.query, current_user.role)
+        if not decision.allowed:
+            log_trace(
+                logger,
+                "api_response",
+                endpoint="/api/rag/ask",
+                status="access_denied",
+                access_domain=decision.domain,
+                access_action=decision.action,
+                access_reason=decision.reason,
+                elapsed_ms=elapsed_ms(start),
+            )
+            return ApiResponse(data={"answer": decision.message, "sources": []})
+        try:
+            response = ApiResponse(data=rag_service.answer(request.query, top_k=request.top_k))
+            log_trace(logger, "api_response", endpoint="/api/rag/ask", status="ok", elapsed_ms=elapsed_ms(start))
+            return response
+        except Exception as exc:
+            logger.error("[api] rag ask failed: %s", exc, exc_info=True)
+            log_trace(logger, "api_response", endpoint="/api/rag/ask", status="error", error=f"{type(exc).__name__}: {exc}", elapsed_ms=elapsed_ms(start))
+            raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post("/chat", response_model=ApiResponse)
 def chat(request: ChatRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    try:
-        response = chat_service.answer(
-            query=request.query,
-            session_id=request.session_id,
-            use_agent=request.use_agent,
-            history=request.history,
-            tenant_id=current_user.tenant_id,
-            user_id=current_user.id,
-            user_role=current_user.role,
-            db=db,
-        )
-        return ApiResponse(data=response)
-    except Exception as exc:
-        logger.error("[api] chat failed: %s", exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+    trace_id = new_trace_id()
+    start = now_ms()
+    with trace_scope(trace_id):
+        try:
+            log_trace(
+                logger,
+                "api_request",
+                endpoint="/api/chat",
+                user=current_user.username,
+                role=current_user.role,
+                tenant_id=current_user.tenant_id,
+                session_id=request.session_id,
+                query=short_text(request.query),
+            )
+            response = chat_service.answer(
+                query=request.query,
+                session_id=request.session_id,
+                use_agent=request.use_agent,
+                history=request.history,
+                tenant_id=current_user.tenant_id,
+                user_id=current_user.id,
+                user_role=current_user.role,
+                db=db,
+                trace_id=trace_id,
+            )
+            log_trace(logger, "api_response", endpoint="/api/chat", status="ok", elapsed_ms=elapsed_ms(start))
+            return ApiResponse(data=response)
+        except Exception as exc:
+            logger.error("[api] chat failed: %s", exc, exc_info=True)
+            log_trace(logger, "api_response", endpoint="/api/chat", status="error", error=f"{type(exc).__name__}: {exc}", elapsed_ms=elapsed_ms(start))
+            raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.post("/chat/stream")
 def chat_stream(request: ChatRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    trace_id = new_trace_id()
+    with trace_scope(trace_id):
+        log_trace(
+            logger,
+            "api_request",
+            endpoint="/api/chat/stream",
+            user=current_user.username,
+            role=current_user.role,
+            tenant_id=current_user.tenant_id,
+            session_id=request.session_id,
+            query=short_text(request.query),
+        )
     try:
-        return StreamingResponse(
+        response = StreamingResponse(
             chat_service.stream_answer(
                 query=request.query,
                 session_id=request.session_id,
@@ -162,16 +215,61 @@ def chat_stream(request: ChatRequest, current_user: User = Depends(get_current_u
                 user_id=current_user.id,
                 user_role=current_user.role,
                 db=db,
+                trace_id=trace_id,
             ),
             media_type="application/x-ndjson; charset=utf-8",
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
+                "X-Trace-Id": trace_id,
             },
         )
+        with trace_scope(trace_id):
+            log_trace(logger, "api_response", endpoint="/api/chat/stream", status="stream_started")
+        return response
     except Exception as exc:
         logger.error("[api] chat stream failed: %s", exc, exc_info=True)
+        with trace_scope(trace_id):
+            log_trace(logger, "api_response", endpoint="/api/chat/stream", status="error", error=f"{type(exc).__name__}: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.post("/messages/{message_id}/retry", response_model=ApiResponse)
+def retry_message(
+    message_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    trace_id = new_trace_id()
+    start = now_ms()
+    with trace_scope(trace_id):
+        try:
+            log_trace(
+                logger,
+                "api_request",
+                endpoint="/api/messages/retry",
+                user=current_user.username,
+                role=current_user.role,
+                tenant_id=current_user.tenant_id,
+                message_id=message_id,
+            )
+            response = chat_service.retry_answer(
+                assistant_message_id=message_id,
+                tenant_id=current_user.tenant_id,
+                user_id=current_user.id,
+                user_role=current_user.role,
+                db=db,
+                trace_id=trace_id,
+            )
+            log_trace(logger, "api_response", endpoint="/api/messages/retry", status="ok", elapsed_ms=elapsed_ms(start))
+            return ApiResponse(data=response)
+        except ValueError as exc:
+            log_trace(logger, "api_response", endpoint="/api/messages/retry", status="bad_request", error=str(exc), elapsed_ms=elapsed_ms(start))
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            logger.error("[api] retry message failed: %s", exc, exc_info=True)
+            log_trace(logger, "api_response", endpoint="/api/messages/retry", status="error", error=f"{type(exc).__name__}: {exc}", elapsed_ms=elapsed_ms(start))
+            raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.delete("/sessions/{session_id}", response_model=ApiResponse)
@@ -203,8 +301,13 @@ def conversation_messages(session_id: str, current_user: User = Depends(get_curr
     return ApiResponse(
         data=[
             MessageResponse(
+                id=row.id,
                 role=row.role,
                 content=row.content,
+                status=row.status or "success",
+                retryable=bool(row.retryable),
+                error_message=row.error_message,
+                parent_message_id=row.parent_message_id,
                 created_at=row.created_at.isoformat(),
             )
             for row in rows

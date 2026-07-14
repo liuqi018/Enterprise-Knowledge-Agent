@@ -25,6 +25,7 @@ from AIRAGAgent.services.query_classifier import classify_query
 from AIRAGAgent.utils.amount_parser import extract_amount
 from AIRAGAgent.utils.json_guard import parse_json_array
 from AIRAGAgent.utils.logger_handler import logger
+from AIRAGAgent.utils.trace import elapsed_ms, log_trace, now_ms, short_text
 
 
 class EnterpriseAgentState(TypedDict, total=False):
@@ -128,15 +129,30 @@ class EnterpriseKnowledgeWorkflow:
         return graph.compile()
 
     def invoke(self, query: str, history: Optional[List[Dict[str, str]]] = None) -> str:
+        start = now_ms()
+        log_trace(logger, "workflow_start", mode="sync", history_count=len(history or []), query=short_text(query))
         result = self.graph.invoke({"query": query, "history": history or []})
-        return result.get("final_answer", "")
+        answer = result.get("final_answer", "")
+        log_trace(
+            logger,
+            "workflow_done",
+            mode="sync",
+            intent=result.get("intent"),
+            tools=",".join((result.get("tool_results") or {}).keys()),
+            answer_chars=len(answer or ""),
+            elapsed_ms=elapsed_ms(start),
+        )
+        return answer
 
     def stream(self, query: str, history: Optional[List[Dict[str, str]]] = None):
+        start = now_ms()
+        log_trace(logger, "workflow_start", mode="stream", history_count=len(history or []), query=short_text(query))
         state: EnterpriseAgentState = {"query": query, "history": history or []}
         state = self.intent_node(state)
         state = self.planner_node(state)
         state = self.tool_executor_node(state)
         state = self.risk_review_node(state)
+        first_chunk = True
         for chunk in self.final_chain.stream(
             {
                 "query": state["query"],
@@ -144,7 +160,24 @@ class EnterpriseKnowledgeWorkflow:
             }
         ):
             if chunk:
+                if first_chunk:
+                    log_trace(
+                        logger,
+                        "workflow_first_chunk",
+                        intent=state.get("intent"),
+                        tools=",".join((state.get("tool_results") or {}).keys()),
+                        elapsed_ms=elapsed_ms(start),
+                    )
+                    first_chunk = False
                 yield str(chunk)
+        log_trace(
+            logger,
+            "workflow_done",
+            mode="stream",
+            intent=state.get("intent"),
+            tools=",".join((state.get("tool_results") or {}).keys()),
+            elapsed_ms=elapsed_ms(start),
+        )
 
     def intent_node(self, state: EnterpriseAgentState) -> EnterpriseAgentState:
         query = state["query"]
@@ -162,6 +195,7 @@ class EnterpriseKnowledgeWorkflow:
         else:
             intent = "policy_qa"
         logger.info("[EnterpriseWorkflow] intent=%s query=%s", intent, query)
+        log_trace(logger, "workflow_intent", intent=intent, route_mode=route.mode, query=short_text(query))
         return {**state, "intent": intent}
 
     def _is_flow_generation_query(self, query: str) -> bool:
@@ -188,6 +222,15 @@ class EnterpriseKnowledgeWorkflow:
                 logger.info("[EnterpriseWorkflow] fallback to rule-based plan")
 
         logger.info("[EnterpriseWorkflow] plan=%s", plan)
+        log_trace(
+            logger,
+            "workflow_plan",
+            intent=intent,
+            planner="llm_or_rule" if settings.AGENT_LLM_PLANNER_ENABLED else "rule",
+            amount=amount,
+            tools=",".join(step.get("tool", "") for step in plan),
+            steps=len(plan),
+        )
         return {**state, "plan": plan}
 
     def _rule_based_plan(self, query: str, intent: str, amount: float) -> List[Dict[str, Any]]:
@@ -353,19 +396,40 @@ class EnterpriseKnowledgeWorkflow:
         for step in state.get("plan", []):
             tool_name = step["tool"]
             args = dict(step.get("args", {}))
+            tool_start = now_ms()
             try:
                 args = self._enrich_args_from_context(tool_name, args, state["query"], results)
                 if tool_name == "fetch_external_data":
                     args.setdefault("employee_id", context.get("employee_id", "E1001"))
                     args.setdefault("month", context.get("month", get_current_month.invoke({})))
+                log_trace(
+                    logger,
+                    "workflow_tool_start",
+                    tool=tool_name,
+                    args_keys=",".join(sorted(args.keys())),
+                )
                 result = self._invoke_tool(tool_name, args)
                 results[tool_name] = result
+                log_trace(
+                    logger,
+                    "workflow_tool_done",
+                    tool=tool_name,
+                    result_chars=len(result or ""),
+                    elapsed_ms=elapsed_ms(tool_start),
+                )
                 if tool_name == "get_employee_id":
                     context["employee_id"] = result
                 if tool_name == "get_current_month":
                     context["month"] = result
             except Exception as exc:
                 logger.error("[EnterpriseWorkflow] tool %s failed: %s", tool_name, exc, exc_info=True)
+                log_trace(
+                    logger,
+                    "workflow_tool_failed",
+                    tool=tool_name,
+                    error=f"{type(exc).__name__}: {exc}",
+                    elapsed_ms=elapsed_ms(tool_start),
+                )
                 results[tool_name] = self._tool_failure_fallback(tool_name, args, state["query"], exc, results)
         return {**state, "tool_results": results}
 
@@ -489,14 +553,29 @@ class EnterpriseKnowledgeWorkflow:
                     )
         if review_notes:
             results["review_notes"] = "\n".join(review_notes)
+        log_trace(
+            logger,
+            "workflow_risk_review",
+            intent=state.get("intent"),
+            review_notes=len(review_notes),
+            tools=",".join(results.keys()),
+        )
         return {**state, "tool_results": results, "review_notes": review_notes}
 
     def final_answer_node(self, state: EnterpriseAgentState) -> EnterpriseAgentState:
+        start = now_ms()
         answer = self.final_chain.invoke(
             {
                 "query": state["query"],
                 "tool_results": json.dumps(state.get("tool_results", {}), ensure_ascii=False, indent=2),
             }
+        )
+        log_trace(
+            logger,
+            "workflow_final_answer",
+            intent=state.get("intent"),
+            answer_chars=len(answer or ""),
+            elapsed_ms=elapsed_ms(start),
         )
         return {**state, "final_answer": answer}
 
