@@ -64,6 +64,8 @@ Do not use external knowledge. Be strict:
 - Penalize answers that refuse or say there is no basis when the retrieved sources support an answer.
 - Penalize answers that answer a different topic.
 - Passing requires the answer to be useful for an employee and grounded in the retrieved sources.
+- If expected_no_answer is true, pass only when the answer clearly says the evidence is insufficient
+  or no clear policy basis is available, and does not invent a concrete policy.
 
 Return one JSON object only. No markdown. No extra text.
 Schema:
@@ -87,6 +89,19 @@ Scoring:
 Evaluation payload:
 {payload}
 """
+
+
+NO_ANSWER_MARKERS = [
+    "\u6ca1\u6709\u660e\u786e\u4f9d\u636e",
+    "\u77e5\u8bc6\u5e93\u4e2d\u6ca1\u6709\u660e\u786e\u4f9d\u636e",
+    "\u8d44\u6599\u672a\u660e\u786e",
+    "\u672a\u660e\u786e",
+    "\u65e0\u6cd5\u786e\u8ba4",
+    "\u4e0d\u80fd\u7f16\u9020",
+    "\u4e0d\u5e94\u7f16\u9020",
+    "\u672a\u68c0\u7d22\u5230",
+    "\u672a\u67e5\u8be2\u5230",
+]
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -158,6 +173,8 @@ def judge_payload(case: dict[str, Any], row: dict[str, Any]) -> dict[str, Any]:
         "case_id": case["id"],
         "question": case["query"],
         "question_type": case["question_type"],
+        "hard_type": case.get("hard_type", ""),
+        "expected_no_answer": bool(case.get("expected_no_answer", False)),
         "expected_domain": case["expected_domain"],
         "expected_source_keywords": case["expected_source_keywords"],
         "expected_answer_keywords": case["expected_answer_keywords"],
@@ -244,6 +261,10 @@ def judge_answer(case: dict[str, Any], row: dict[str, Any], min_score: float) ->
         }
 
 
+def detects_no_answer(answer: str) -> bool:
+    return any(marker in str(answer or "") for marker in NO_ANSWER_MARKERS)
+
+
 def dcg(relevance: list[int]) -> float:
     total = 0.0
     for index, rel in enumerate(relevance, start=1):
@@ -264,6 +285,8 @@ def evaluate_case(
     expected_domain = case["expected_domain"]
     source_keywords = case["expected_source_keywords"]
     answer_keywords = case["expected_answer_keywords"]
+    hard_type = str(case.get("hard_type") or case["question_type"])
+    expected_no_answer = bool(case.get("expected_no_answer", False))
 
     start = time.perf_counter()
     docs = service.retrieve_documents(query, top_k=max_k)[:max_k]
@@ -297,6 +320,7 @@ def evaluate_case(
         answer = service.generate_answer(query, docs) if docs else ""
         answer_latency_ms = (time.perf_counter() - answer_start) * 1000
         answer_keyword_hit_list = keyword_hits(answer, answer_keywords)
+    no_answer_detected = detects_no_answer(answer) if not skip_answer else False
     missing_answer_keywords = [
         keyword for keyword in answer_keywords if keyword not in answer_keyword_hit_list
     ]
@@ -311,6 +335,8 @@ def evaluate_case(
         "id": case["id"],
         "query": query,
         "question_type": case["question_type"],
+        "hard_type": hard_type,
+        "expected_no_answer": expected_no_answer,
         "expected_domain": expected_domain,
         "expected_source_keywords": source_keywords,
         "expected_answer_keywords": answer_keywords,
@@ -345,6 +371,8 @@ def evaluate_case(
         "missing_answer_keywords": missing_answer_keywords,
         "answer_keyword_coverage": round(answer_keyword_coverage, 4),
         "answer_latency_ms": round(answer_latency_ms, 2),
+        "no_answer_detected": 1 if no_answer_detected else 0,
+        "no_answer_pass": 1 if expected_no_answer and no_answer_detected else 0,
     }
     if judge_answer_enabled and not skip_answer:
         judge_start = time.perf_counter()
@@ -369,23 +397,29 @@ def average(rows: list[dict[str, Any]], key: str) -> float:
 
 
 def summarize(rows: list[dict[str, Any]], skip_answer: bool) -> dict[str, Any]:
+    retrieval_rows = [row for row in rows if not row.get("expected_no_answer")]
+    no_answer_rows = [row for row in rows if row.get("expected_no_answer")]
     summary = {
         "cases": len(rows),
-        "hit@1": average(rows, "hit@1"),
-        "hit@3": average(rows, "hit@3"),
-        "hit@5": average(rows, "hit@5"),
-        "recall@1": average(rows, "recall@1"),
-        "recall@3": average(rows, "recall@3"),
-        "recall@5": average(rows, "recall@5"),
-        "domain_hit@3": average(rows, "domain_hit@3"),
-        "source_hit@3": average(rows, "source_hit@3"),
-        "mrr": average(rows, "mrr"),
-        "ndcg@5": average(rows, "ndcg@5"),
+        "retrieval_cases": len(retrieval_rows),
+        "hit@1": average(retrieval_rows, "hit@1"),
+        "hit@3": average(retrieval_rows, "hit@3"),
+        "hit@5": average(retrieval_rows, "hit@5"),
+        "recall@1": average(retrieval_rows, "recall@1"),
+        "recall@3": average(retrieval_rows, "recall@3"),
+        "recall@5": average(retrieval_rows, "recall@5"),
+        "domain_hit@3": average(retrieval_rows, "domain_hit@3"),
+        "source_hit@3": average(retrieval_rows, "source_hit@3"),
+        "mrr": average(retrieval_rows, "mrr"),
+        "ndcg@5": average(retrieval_rows, "ndcg@5"),
         "avg_retrieval_latency_ms": round(
             sum(float(row.get("retrieval_latency_ms", 0.0)) for row in rows) / max(len(rows), 1),
             2,
         ),
     }
+    if no_answer_rows:
+        summary["no_answer_cases"] = len(no_answer_rows)
+        summary["no_answer_pass_rate"] = average(no_answer_rows, "no_answer_pass")
     if not skip_answer:
         summary["answer_keyword_coverage"] = average(rows, "answer_keyword_coverage")
         summary["avg_answer_latency_ms"] = round(
@@ -414,13 +448,27 @@ def summarize_by_group(rows: list[dict[str, Any]], group_key: str, skip_answer: 
 
 
 def coverage_summary(cases: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
-    return {
+    summary = {
         "by_domain": dict(sorted(Counter(str(case.get("expected_domain", "unknown")) for case in cases).items())),
         "by_question_type": dict(sorted(Counter(str(case.get("question_type", "unknown")) for case in cases).items())),
     }
+    hard_type_counts = Counter(str(case.get("hard_type")) for case in cases if case.get("hard_type"))
+    if hard_type_counts:
+        summary["by_hard_type"] = dict(sorted(hard_type_counts.items()))
+    no_answer_count = sum(1 for case in cases if case.get("expected_no_answer"))
+    if no_answer_count:
+        summary["by_expected_no_answer"] = {
+            "false": len(cases) - no_answer_count,
+            "true": no_answer_count,
+        }
+    return summary
 
 
 def diagnose_failure(row: dict[str, Any], skip_answer: bool, min_answer_coverage: float) -> str:
+    if row.get("expected_no_answer"):
+        if row.get("no_answer_pass"):
+            return "expected_no_answer_passed"
+        return "no_answer_policy_failed"
     if row["hit@3"] == 0:
         return "retrieval_miss"
     if row["source_hit@3"] == 0:
@@ -438,6 +486,8 @@ def diagnose_failure(row: dict[str, Any], skip_answer: bool, min_answer_coverage
 
 def failure_category(row: dict[str, Any], skip_answer: bool, min_answer_coverage: float) -> str:
     reason = row.get("failure_reason") or diagnose_failure(row, skip_answer, min_answer_coverage)
+    if reason == "no_answer_policy_failed":
+        return "no_answer_failure"
     if reason == "retrieval_miss":
         return "retrieval_failure"
     if reason in {"domain_mismatch", "source_keyword_mismatch"}:
@@ -472,6 +522,7 @@ def failure_analysis_summary(failed: list[dict[str, Any]]) -> dict[str, Any]:
         "judge_output_failure": "The LLM judge did not return a valid structured result.",
         "answer_faithfulness_or_hallucination_risk": "The judge found unsupported or weakly grounded answer content.",
         "answer_incomplete": "The answer was grounded but missed required points.",
+        "no_answer_failure": "The case expected no direct policy basis, but the answer did not clearly refuse or state insufficient evidence.",
         "judge_failed_other": "The judge failed the answer for mixed or non-specific reasons.",
         "unknown": "The failure did not match a known category.",
     }
@@ -506,10 +557,17 @@ def markdown_cell(text: Any, limit: int = 180) -> str:
 def failed_rows(rows: list[dict[str, Any]], skip_answer: bool, min_answer_coverage: float) -> list[dict[str, Any]]:
     result = []
     for row in rows:
-        failed = row["hit@3"] == 0
+        if row.get("expected_no_answer"):
+            failed = not bool(row.get("no_answer_pass"))
+        else:
+            failed = row["hit@3"] == 0
+        judge_passed = bool(row.get("judge") and row.get("judge_passed"))
         if not skip_answer and row["answer_keyword_coverage"] < min_answer_coverage:
-            failed = True
-        if row.get("judge") and not row.get("judge_passed"):
+            # Keyword coverage is a cheap diagnostic, not a stricter signal than
+            # the answer judge. If the judge passes, keep the row out of the
+            # failed list and report the low keyword coverage as a residual metric.
+            failed = failed or (not row.get("expected_no_answer") and not judge_passed)
+        if row.get("judge") and not row.get("judge_passed") and not row.get("expected_no_answer"):
             failed = True
         if failed:
             failed_row = dict(row)
@@ -547,6 +605,14 @@ def write_markdown(report: dict[str, Any], output_path: Path) -> None:
     lines.extend(["", "### By Question Type", "", "| Question Type | Cases |", "| --- | ---: |"])
     for question_type, count in report.get("coverage", {}).get("by_question_type", {}).items():
         lines.append(f"| {question_type} | {count} |")
+    if report.get("coverage", {}).get("by_hard_type"):
+        lines.extend(["", "### By Hard Type", "", "| Hard Type | Cases |", "| --- | ---: |"])
+        for hard_type, count in report.get("coverage", {}).get("by_hard_type", {}).items():
+            lines.append(f"| {hard_type} | {count} |")
+    if report.get("coverage", {}).get("by_expected_no_answer"):
+        lines.extend(["", "### By Expected No Answer", "", "| Expected No Answer | Cases |", "| --- | ---: |"])
+        for flag, count in report.get("coverage", {}).get("by_expected_no_answer", {}).items():
+            lines.append(f"| {flag} | {count} |")
 
     lines.extend(["", "## Metrics By Domain", "", "| Domain | Cases | Recall@3 | Hit@3 | Domain Hit@3 | Source Hit@3 | MRR | NDCG@5 |"])
     lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
@@ -555,6 +621,16 @@ def write_markdown(report: dict[str, Any], output_path: Path) -> None:
             f"| {domain} | {item['cases']} | {item.get('recall@3', item['hit@3'])} | {item['hit@3']} | {item['domain_hit@3']} | "
             f"{item['source_hit@3']} | {item['mrr']} | {item['ndcg@5']} |"
         )
+
+    if report.get("by_hard_type"):
+        lines.extend(["", "## Metrics By Hard Type", "", "| Hard Type | Cases | Retrieval Cases | Recall@3 | MRR | NDCG@5 | No-Answer Pass Rate | Judge Pass Rate |"])
+        lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
+        for hard_type, item in report["by_hard_type"].items():
+            lines.append(
+                f"| {hard_type} | {item['cases']} | {item.get('retrieval_cases', item['cases'])} | "
+                f"{item.get('recall@3', item.get('hit@3', 0))} | {item.get('mrr', 0)} | {item.get('ndcg@5', 0)} | "
+                f"{item.get('no_answer_pass_rate', 'N/A')} | {item.get('judge_pass_rate', 'N/A')} |"
+            )
 
     if report["failed"]:
         reason_counts = Counter(row.get("failure_reason", "unknown") for row in report["failed"])
@@ -577,9 +653,10 @@ def write_markdown(report: dict[str, Any], output_path: Path) -> None:
     else:
         for row in report["failed"][:30]:
             lines.append(
-                f"- `{row['id']}` [{row['expected_domain']}] {row['query']} "
+                f"- `{row['id']}` [{row['expected_domain']}/{row.get('hard_type', row.get('question_type', ''))}] {row['query']} "
                 f"(reason={row.get('failure_reason', 'unknown')}, "
                 f"category={row.get('failure_category', 'unknown')}, "
+                f"expected_no_answer={row.get('expected_no_answer', False)}, "
                 f"hit@3={row['hit@3']}, first_hit_rank={row['first_hit_rank']}, "
                 f"answer_coverage={row.get('answer_keyword_coverage', 0)}, "
                 f"judge_passed={row.get('judge_passed', 'N/A')}, "
@@ -594,6 +671,9 @@ def write_markdown(report: dict[str, Any], output_path: Path) -> None:
                     f"### {row['id']} [{row['expected_domain']}]",
                     "",
                     f"- Question: {row['query']}",
+                    f"- Hard type: `{row.get('hard_type', row.get('question_type', ''))}`",
+                    f"- Expected no answer: `{row.get('expected_no_answer', False)}`",
+                    f"- No-answer detected/pass: {row.get('no_answer_detected', 0)}/{row.get('no_answer_pass', 0)}",
                     f"- Failure reason: `{row.get('failure_reason', 'unknown')}`",
                     f"- Failure category: `{row.get('failure_category', 'unknown')}`",
                     f"- Retrieval: hit@3={row['hit@3']}, source_hit@3={row['source_hit@3']}, "
@@ -699,6 +779,9 @@ def main() -> int:
         "metrics": summarize(rows, args.skip_answer),
         "by_domain": summarize_by_group(rows, "expected_domain", args.skip_answer),
         "by_question_type": summarize_by_group(rows, "question_type", args.skip_answer),
+        "by_hard_type": summarize_by_group(rows, "hard_type", args.skip_answer)
+        if any(row.get("hard_type") for row in rows)
+        else {},
         "failed_count": len(failed),
         "failure_analysis": failure_analysis_summary(failed),
         "failed": failed,
