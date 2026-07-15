@@ -1,0 +1,83 @@
+restricted_message: "抱歉，你暂时没有这个权限哦~"
+
+actions:
+  allow: "允许访问该制度域的所有问题"
+  general_only: "允许访问泛化流程和制度说明，限制敏感明细"
+  deny: "限制访问该制度域"
+
+sensitive_detail_keywords:
+  - 金额
+  - 标准
+  - 明细
+  - 名单
+  - 具体数额
+  - 工资条
+  - 密码
+  - 账号
+  - 权限开通
+  - 数据库
+  - 密级
+  - 个人
+  - 身份证
+  - 银行卡
+
+domains:
+  finance:
+    name: 财务制度
+    keywords:
+      - 财务
+      - 付款
+      - 收款
+      - 资金
+      - 预算
+      - 发票
+      - 借款
+      - 报销
+  salary_performance:
+    name: 薪酬绩效制度
+    keywords:
+      - 薪资
+      - 工资
+      - 绩效
+      - 奖金
+      - 提成
+      - 调薪
+      - 考核
+  security:
+    name: 信息安全制度
+    keywords:
+      - 信息安全
+      - 权限
+      - 账号
+      - 访问控制
+      - 保密
+      - 数据
+      - 系统权限
+
+roles:
+  admin:
+    default: allow
+  user:
+    default: allow
+    domains:
+      finance: general_only
+      salary_performance: general_only
+      security: general_only
+  hr:
+    default: allow
+    domains:
+      finance: general_only
+      salary_performance: allow
+      security: general_only
+  finance:
+    default: allow
+    domains:
+      finance: allow
+      salary_performance: general_only
+      security: general_only
+  security:
+    default: allow
+    domains:
+      finance: general_only
+      salary_performance: general_only
+      security: allow

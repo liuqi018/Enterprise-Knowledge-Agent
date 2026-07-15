@@ -75,6 +75,7 @@ __pypackages__/
 .env
 .env.*
 !.env.example
+!.env.docker.example
 .envrc
 .venv/
 .venv310/

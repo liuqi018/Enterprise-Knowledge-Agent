@@ -81,13 +81,15 @@ class ChatService:
         db: Session = None,
         trace_id: str = None,
     ) -> ChatResponse:
-        with trace_scope(trace_id or new_trace_id()):
+        active_trace_id = trace_id or new_trace_id()
+        with trace_scope(active_trace_id):
             total_start = now_ms()
             sid, is_new_session = self._get_session_context(db, user_id, session_id, query)
             merged_history = [] if is_new_session else (history or self._history(db, user_id, sid))
             log_trace(
                 logger,
                 "chat_start",
+                trace_id=active_trace_id,
                 mode="sync",
                 session_id=sid,
                 requested_session_id=session_id,
@@ -109,6 +111,7 @@ class ChatService:
             log_trace(
                 logger,
                 "context_resolved",
+                trace_id=active_trace_id,
                 session_id=sid,
                 contextual_follow_up=contextual_follow_up,
                 clarification=bool(clarification),
@@ -121,6 +124,7 @@ class ChatService:
             log_trace(
                 logger,
                 "route_decision",
+                trace_id=active_trace_id,
                 mode=route.mode,
                 retrieval_mode=route.retrieval_mode,
                 confidence=route.confidence,
@@ -138,7 +142,7 @@ class ChatService:
                     answer = access_decision.message
                 elif clarification:
                     branch = f"clarification_{clarification['choice']}"
-                    answer, sources = self._answer_clarification_choice(clarification, tenant_id, merged_history)
+                    answer, sources = self._answer_clarification_choice(clarification, tenant_id, merged_history, trace_id=active_trace_id)
                 elif self._needs_clarification(route) and not contextual_follow_up:
                     branch = "clarification_menu"
                     answer = self._clarification_answer(effective_query)
@@ -151,7 +155,7 @@ class ChatService:
                     answer = self._workflow().invoke(effective_query, history_payload).strip()
                 else:
                     branch = "rag"
-                    rag_response = self.rag_service.answer(effective_query, tenant_id=tenant_id)
+                    rag_response = self.rag_service.answer(effective_query, tenant_id=tenant_id, trace_id=active_trace_id)
                     answer = rag_response.answer
                     sources = rag_response.sources
             except Exception as exc:
@@ -159,7 +163,7 @@ class ChatService:
                 logger.error("[chat] failed, fallback to RAG: %s", exc, exc_info=True)
                 log_trace(logger, "chat_error_fallback", error=f"{type(exc).__name__}: {exc}")
                 try:
-                    rag_response = self.rag_service.answer(effective_query, tenant_id=tenant_id)
+                    rag_response = self.rag_service.answer(effective_query, tenant_id=tenant_id, trace_id=active_trace_id)
                     answer = rag_response.answer
                     sources = rag_response.sources
                 except Exception as fallback_exc:
@@ -172,6 +176,7 @@ class ChatService:
             log_trace(
                 logger,
                 "chat_done",
+                trace_id=active_trace_id,
                 branch=branch,
                 elapsed_ms=elapsed_ms(total_start),
                 answer_chars=len(answer or ""),
@@ -268,7 +273,7 @@ class ChatService:
                 elif clarification:
                     branch = f"clarification_{clarification['choice']}"
                     yield self._stream_event("status", {"message": "\u5df2\u786e\u8ba4\u5904\u7406\u65b9\u5f0f\uff0c\u6b63\u5728\u7ee7\u7eed\u5904\u7406..."})
-                    for chunk, chunk_sources in self._stream_clarification_choice(clarification, merged_history, tenant_id):
+                    for chunk, chunk_sources in self._stream_clarification_choice(clarification, merged_history, tenant_id, trace_id=active_trace_id):
                         full_answer += chunk
                         sources = chunk_sources
                         yield self._stream_event("delta", {"content": chunk})
@@ -294,7 +299,7 @@ class ChatService:
                 else:
                     branch = "rag"
                     yield self._stream_event("status", {"message": "\u6b63\u5728\u5feb\u901f\u68c0\u7d22\u5236\u5ea6\u5e93..."})
-                    for chunk, rag_sources in self.rag_service.stream_answer(effective_query, tenant_id=tenant_id):
+                    for chunk, rag_sources in self.rag_service.stream_answer(effective_query, tenant_id=tenant_id, trace_id=active_trace_id):
                         if not full_answer:
                             yield self._stream_event("status", {"message": "\u6b63\u5728\u751f\u6210\u56de\u7b54..."})
                         full_answer += chunk
@@ -306,7 +311,7 @@ class ChatService:
                 log_trace(logger, "chat_stream_error_fallback", trace_id=active_trace_id, error=f"{type(exc).__name__}: {exc}")
                 yield self._stream_event("status", {"message": "\u51fa\u73b0\u5f02\u5e38\uff0c\u6b63\u5728\u4f7f\u7528 RAG \u515c\u5e95\u56de\u7b54..."})
                 try:
-                    rag_response = self.rag_service.answer(effective_query, tenant_id=tenant_id)
+                    rag_response = self.rag_service.answer(effective_query, tenant_id=tenant_id, trace_id=active_trace_id)
                     full_answer = rag_response.answer
                     sources = rag_response.sources
                     yield self._stream_event("delta", {"content": full_answer})
@@ -428,22 +433,22 @@ class ChatService:
             return "risk"
         return None
 
-    def _answer_clarification_choice(self, clarification: dict, tenant_id: str, history: List[ChatMessage]):
+    def _answer_clarification_choice(self, clarification: dict, tenant_id: str, history: List[ChatMessage], trace_id: str = None):
         query = self._clarified_query(clarification)
         if clarification["choice"] == "flow":
             return self._workflow().invoke(query, self._history_payload(history)).strip(), []
         if clarification["choice"] == "risk":
             return self._workflow().invoke(query, self._history_payload(history)).strip(), []
-        rag_response = self.rag_service.answer(query, tenant_id=tenant_id)
+        rag_response = self.rag_service.answer(query, tenant_id=tenant_id, trace_id=trace_id)
         return rag_response.answer, rag_response.sources
 
-    def _stream_clarification_choice(self, clarification: dict, history: List[ChatMessage], tenant_id: str):
+    def _stream_clarification_choice(self, clarification: dict, history: List[ChatMessage], tenant_id: str, trace_id: str = None):
         query = self._clarified_query(clarification)
         if clarification["choice"] in {"flow", "risk"}:
             for chunk in self._workflow().stream(query, self._history_payload(history)):
                 yield str(chunk), []
             return
-        for chunk, sources in self.rag_service.stream_answer(query, tenant_id=tenant_id):
+        for chunk, sources in self.rag_service.stream_answer(query, tenant_id=tenant_id, trace_id=trace_id):
             yield chunk, sources
 
     def _clarified_query(self, clarification: dict) -> str:
@@ -485,12 +490,14 @@ class ChatService:
         query = user_message.content
         sid = user_message.session_id
 
-        with trace_scope(trace_id or new_trace_id()):
+        active_trace_id = trace_id or new_trace_id()
+        with trace_scope(active_trace_id):
             total_start = now_ms()
             merged_history = conversation_service.history(db, user_id, sid)
             log_trace(
                 logger,
                 "chat_retry_start",
+                trace_id=active_trace_id,
                 session_id=sid,
                 tenant_id=tenant_id,
                 user_role=user_role,
@@ -512,6 +519,7 @@ class ChatService:
                 log_trace(
                     logger,
                     "route_decision",
+                    trace_id=active_trace_id,
                     mode=route.mode,
                     retrieval_mode=route.retrieval_mode,
                     confidence=route.confidence,
@@ -527,7 +535,7 @@ class ChatService:
                         answer = access_decision.message
                     elif clarification:
                         branch = f"clarification_{clarification['choice']}"
-                        answer, sources = self._answer_clarification_choice(clarification, tenant_id, merged_history)
+                        answer, sources = self._answer_clarification_choice(clarification, tenant_id, merged_history, trace_id=active_trace_id)
                     elif self._needs_clarification(route) and not contextual_follow_up:
                         branch = "clarification_menu"
                         answer = self._clarification_answer(effective_query)
@@ -540,14 +548,14 @@ class ChatService:
                         answer = self._workflow().invoke(effective_query, history_payload).strip()
                     else:
                         branch = "rag"
-                        rag_response = self.rag_service.answer(effective_query, tenant_id=tenant_id)
+                        rag_response = self.rag_service.answer(effective_query, tenant_id=tenant_id, trace_id=active_trace_id)
                         answer = rag_response.answer
                         sources = rag_response.sources
                 except Exception as exc:
                     branch = "rag_fallback"
                     logger.error("[chat retry] failed, fallback to RAG: %s", exc, exc_info=True)
-                    log_trace(logger, "chat_retry_error_fallback", error=f"{type(exc).__name__}: {exc}")
-                    rag_response = self.rag_service.answer(effective_query, tenant_id=tenant_id)
+                    log_trace(logger, "chat_retry_error_fallback", trace_id=active_trace_id, error=f"{type(exc).__name__}: {exc}")
+                    rag_response = self.rag_service.answer(effective_query, tenant_id=tenant_id, trace_id=active_trace_id)
                     answer = rag_response.answer
                     sources = rag_response.sources
 
@@ -557,6 +565,7 @@ class ChatService:
                 log_trace(
                     logger,
                     "chat_retry_done",
+                    trace_id=active_trace_id,
                     branch=branch,
                     elapsed_ms=elapsed_ms(total_start),
                     answer_chars=len(answer or ""),
@@ -570,7 +579,7 @@ class ChatService:
                 )
             except Exception as exc:
                 self._mark_assistant_failed(db, user_id, assistant_message, exc)
-                log_trace(logger, "chat_retry_failed", error=f"{type(exc).__name__}: {exc}")
+                log_trace(logger, "chat_retry_failed", trace_id=active_trace_id, error=f"{type(exc).__name__}: {exc}")
                 raise
 
     def _create_pending_assistant(self, db: Session, user_id: int, session_id: str, user_message):

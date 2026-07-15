@@ -121,7 +121,8 @@ def knowledge_task(task_id: str, current_user: User = Depends(get_current_user))
 
 @router.post("/rag/ask", response_model=ApiResponse)
 def rag_ask(request: RagRequest, current_user: User = Depends(get_current_user)):
-    with trace_scope(new_trace_id()):
+    trace_id = new_trace_id()
+    with trace_scope(trace_id):
         start = now_ms()
         log_trace(
             logger,
@@ -146,7 +147,7 @@ def rag_ask(request: RagRequest, current_user: User = Depends(get_current_user))
             )
             return ApiResponse(data={"answer": decision.message, "sources": []})
         try:
-            response = ApiResponse(data=rag_service.answer(request.query, top_k=request.top_k))
+            response = ApiResponse(data=rag_service.answer(request.query, top_k=request.top_k, trace_id=trace_id))
             log_trace(logger, "api_response", endpoint="/api/rag/ask", status="ok", elapsed_ms=elapsed_ms(start))
             return response
         except Exception as exc:

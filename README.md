@@ -184,6 +184,71 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=admin123456
 ```
 
+
+## Docker Compose
+
+Docker Compose is for local deployment and interview reproduction. It is independent from the evaluation dataset.
+It starts the FastAPI app and infrastructure services together:
+
+- FastAPI app
+- MySQL
+- Redis
+- Milvus standalone
+- Etcd and MinIO, required by Milvus
+
+Create a Docker environment file first:
+
+```powershell
+copy .env.docker.example .env.docker
+```
+
+Then edit `.env.docker` and fill in your API keys, especially:
+
+```env
+AUTODL_API_KEY=your_autodl_api_key
+DASHSCOPE_API_KEY=your_dashscope_api_key
+JWT_SECRET_KEY=replace_with_a_long_random_secret
+```
+
+Start all services:
+
+```powershell
+docker compose --env-file .env.docker up -d --build
+```
+
+Open the frontend:
+
+```text
+http://127.0.0.1:8000
+```
+
+View logs:
+
+```powershell
+docker compose --env-file .env.docker logs -f app
+```
+
+Stop services:
+
+```powershell
+docker compose --env-file .env.docker down
+```
+
+Remove service data volumes when you need a clean environment:
+
+```powershell
+docker compose --env-file .env.docker down -v
+```
+
+In Docker Compose, service addresses are different from local Windows addresses:
+
+```env
+MYSQL_URL=mysql+pymysql://root:password@mysql:3306/airag_agent?charset=utf8mb4
+REDIS_URL=redis://redis:6379/0
+MILVUS_URI=http://milvus:19530
+VECTOR_BACKEND=milvus
+```
+
 ## 构建知识库
 
 首次运行或文档变更后，需要强制重建索引。
@@ -350,14 +415,37 @@ python scripts\evaluate_manufacturing_rag.py --skip-answer --limit 20 --max-k 5
 eval/results/
 ```
 
+最新 160 条全量评测结果（Milvus，`max-k=5`，启用 LLM-as-Judge 严格回答评测）：
+
+| 指标 | 结果 |
+| --- | ---: |
+| Recall@3 | 99.38% |
+| Recall@5 | 99.38% |
+| MRR | 98.44% |
+| NDCG@5 | 98.34% |
+| Source Hit@3 | 98.12% |
+| Domain Hit@3 | 91.87% |
+| LLM Judge Pass Rate | 91.25% |
+| Judge Accuracy | 4.59 / 5 |
+| Judge Faithfulness | 4.69 / 5 |
+| Judge Groundedness | 4.70 / 5 |
+
+严格回答准确率评测：
+
+```powershell
+python scripts\evaluate_manufacturing_rag.py --max-k 5 --judge-answer
+```
+
 主要指标包括：
 
-- `hit@1 / hit@3 / hit@5`：Top-K 召回是否命中期望业务域或来源关键词
+- `recall@1 / recall@3 / recall@5`：Top-K 召回是否命中期望业务域或来源关键词，等价于报告中的 `hit@1 / hit@3 / hit@5`
 - `domain_hit@3`：Top-3 中是否命中期望业务域
 - `source_hit@3`：Top-3 中是否命中期望来源关键词
 - `mrr`：首个相关结果排名质量
 - `ndcg@5`：Top-5 排序质量
 - `answer_keyword_coverage`：回答关键词覆盖率，非 `--skip-answer` 模式下统计
+- `judge_pass_rate`：LLM-as-Judge 严格回答通过率，可作为最终回答准确率参考
+- `failure_analysis`：失败案例自动归因，包括检索失败、关键词误判、回答不完整、领域标注偏差和 Judge 输出异常等类别
 
 ## 项目亮点
 
@@ -371,6 +459,8 @@ eval/results/
 ## 简历描述参考
 
 制造企业制度知识库与流程合规 Agent：面向中小型制造企业内部制度与流程管理场景，基于 FastAPI、LangChain、Milvus、BM25 和 OpenAI-compatible 大模型 API 构建 RAG + Agent 应用，支持制度问答、流程查询、审批路径判断、申请草稿生成和合规风险提示。项目通过文档清洗、业务域分类、混合检索、RRF 融合和元数据过滤提升企业制度检索质量，覆盖采购、生产、质量、财务、人事、研发、IT 服务和信息安全等业务域。
+
+量化效果：基于 160 条制造业企业制度问答评测集进行离线评估，检索 Recall@3 达 99.38%，MRR 达 98.44%，NDCG@5 达 98.34%；引入 LLM-as-Judge 严格评测最终回答质量，回答通过率达 91.25%，平均准确性 4.59/5，平均忠实性 4.69/5，平均证据支撑 4.70/5。
 
 ## 注意事项
 

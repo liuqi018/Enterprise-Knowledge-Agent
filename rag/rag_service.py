@@ -180,7 +180,7 @@ class RagSummarizeService:
             logger.warning("[QueryRewrite] LLM rewrite failed, fallback to policy rules: %s", exc)
             return self.policy_rule_rewrite(query)
 
-    def retrieve_documents(self, query: str, top_k: int = None, tenant_id: str = None) -> List[Document]:
+    def retrieve_documents(self, query: str, top_k: int = None, tenant_id: str = None, trace_id: str = None) -> List[Document]:
         retrieve_start = now_ms()
         self.ensure_vector_store_ready()
         tenant_id = tenant_id or "global"
@@ -190,6 +190,7 @@ class RagSummarizeService:
         log_trace(
             logger,
             "rag_retrieve_start",
+            trace_id=trace_id,
             tenant_id=tenant_id,
             intent=intent,
             top_k=top_k,
@@ -200,7 +201,7 @@ class RagSummarizeService:
         if intent == "direct_policy":
             target_top_k = top_k or self.answer_top_k(intent)
             vector_k = max(settings.VECTOR_RECALL_TOP_K, target_top_k * 2)
-            selected = self.vector_recall(query.strip(), vector_k, metadata_filter=None)
+            selected = self.vector_recall(query.strip(), vector_k, metadata_filter=None, trace_id=trace_id)
             selected = self.domain_aware_rerank(query, selected)
             selected = selected[:target_top_k]
             rank_mode = "vector_only"
@@ -216,6 +217,7 @@ class RagSummarizeService:
             log_trace(
                 logger,
                 "rag_retrieve_done",
+                trace_id=trace_id,
                 intent=intent,
                 queries=1,
                 recall_lists=1,
@@ -239,12 +241,12 @@ class RagSummarizeService:
             bm25_k = max(settings.BM25_RECALL_TOP_K, target_top_k * 2)
 
         for rewritten in queries:
-            recalled_lists.append(("vector", self.vector_recall(rewritten, vector_k, metadata_filter)))
-            recalled_lists.append(("bm25", self.bm25_recall(rewritten, bm25_k, metadata_filter, tenant_id=tenant_id)))
+            recalled_lists.append(("vector", self.vector_recall(rewritten, vector_k, metadata_filter, trace_id=trace_id)))
+            recalled_lists.append(("bm25", self.bm25_recall(rewritten, bm25_k, metadata_filter, tenant_id=tenant_id, trace_id=trace_id)))
             if metadata_filter:
                 fallback_k = max(target_top_k, 3)
-                recalled_lists.append(("vector_fallback", self.vector_recall(rewritten, fallback_k, metadata_filter=None)))
-                recalled_lists.append(("bm25_fallback", self.bm25_recall(rewritten, fallback_k, metadata_filter=None, tenant_id=tenant_id)))
+                recalled_lists.append(("vector_fallback", self.vector_recall(rewritten, fallback_k, metadata_filter=None, trace_id=trace_id)))
+                recalled_lists.append(("bm25_fallback", self.bm25_recall(rewritten, fallback_k, metadata_filter=None, tenant_id=tenant_id, trace_id=trace_id)))
 
         fused = self.weighted_reciprocal_rank_fusion(recalled_lists)
         filtered = self.light_filter(query, fused)
@@ -271,6 +273,7 @@ class RagSummarizeService:
         log_trace(
             logger,
             "rag_retrieve_done",
+            trace_id=trace_id,
             intent=intent,
             queries=len(queries),
             metadata_filter=metadata_filter,
@@ -295,6 +298,7 @@ class RagSummarizeService:
         query: str,
         k: int,
         metadata_filter: Optional[Dict[str, str]] = None,
+        trace_id: str = None,
     ) -> List[Document]:
         start = now_ms()
         docs = self.vector_store.similarity_search(query, k=k, metadata_filter=metadata_filter)
@@ -303,6 +307,7 @@ class RagSummarizeService:
         log_trace(
             logger,
             "rag_vector_recall",
+            trace_id=trace_id,
             k=k,
             results=len(docs),
             metadata_filter=metadata_filter,
@@ -317,6 +322,7 @@ class RagSummarizeService:
         k: int,
         metadata_filter: Optional[Dict[str, str]] = None,
         tenant_id: str = "default",
+        trace_id: str = None,
     ) -> List[Document]:
         start = now_ms()
         index_tenant = self._bm25_tenant_for_query(tenant_id)
@@ -334,6 +340,7 @@ class RagSummarizeService:
             log_trace(
                 logger,
                 "rag_bm25_recall",
+                trace_id=trace_id,
                 tenant_id=tenant_id,
                 index_tenant=index_tenant,
                 k=k,
@@ -349,6 +356,7 @@ class RagSummarizeService:
             log_trace(
                 logger,
                 "rag_bm25_recall",
+                trace_id=trace_id,
                 tenant_id=tenant_id,
                 index_tenant=index_tenant,
                 k=k,
@@ -386,6 +394,7 @@ class RagSummarizeService:
         log_trace(
             logger,
             "rag_bm25_recall",
+            trace_id=trace_id,
             tenant_id=tenant_id,
             index_tenant=index_tenant,
             k=k,
@@ -946,7 +955,7 @@ class RagSummarizeService:
     def answer_chain_for_intent(self, intent: str):
         return self.answer_chains.get(intent) or self.answer_chains["professional_policy"]
 
-    def generate_answer(self, query: str, documents: List[Document]) -> str:
+    def generate_answer(self, query: str, documents: List[Document], trace_id: str = None) -> str:
         intent = self.intent_from_documents(documents)
         start = now_ms()
         answer = self.answer_chain_for_intent(intent).invoke(
@@ -958,6 +967,7 @@ class RagSummarizeService:
         log_trace(
             logger,
             "rag_answer_generated",
+            trace_id=trace_id,
             intent=intent,
             documents=len(documents),
             answer_chars=len(answer or ""),
@@ -965,11 +975,11 @@ class RagSummarizeService:
         )
         return answer
 
-    def stream_answer(self, query: str, top_k: int = None, tenant_id: str = None):
+    def stream_answer(self, query: str, top_k: int = None, tenant_id: str = None, trace_id: str = None):
         total_start = now_ms()
-        documents = self.retrieve_documents(query, top_k=top_k, tenant_id=tenant_id)
+        documents = self.retrieve_documents(query, top_k=top_k, tenant_id=tenant_id, trace_id=trace_id)
         if not documents:
-            log_trace(logger, "rag_stream_done", documents=0, elapsed_ms=elapsed_ms(total_start))
+            log_trace(logger, "rag_stream_done", trace_id=trace_id, documents=0, elapsed_ms=elapsed_ms(total_start))
             yield "知识库中没有明确依据。", []
             return
 
@@ -987,6 +997,7 @@ class RagSummarizeService:
                     log_trace(
                         logger,
                         "rag_stream_first_chunk",
+                        trace_id=trace_id,
                         intent=intent,
                         documents=len(documents),
                         elapsed_ms=elapsed_ms(total_start),
@@ -996,24 +1007,26 @@ class RagSummarizeService:
         log_trace(
             logger,
             "rag_stream_done",
+            trace_id=trace_id,
             intent=intent,
             documents=len(documents),
             sources_count=len(sources),
             elapsed_ms=elapsed_ms(total_start),
         )
 
-    def answer(self, query: str, top_k: int = None, tenant_id: str = None) -> RagResponse:
+    def answer(self, query: str, top_k: int = None, tenant_id: str = None, trace_id: str = None) -> RagResponse:
         total_start = now_ms()
-        documents = self.retrieve_documents(query, top_k=top_k, tenant_id=tenant_id)
+        documents = self.retrieve_documents(query, top_k=top_k, tenant_id=tenant_id, trace_id=trace_id)
         if not documents:
-            log_trace(logger, "rag_answer_done", documents=0, elapsed_ms=elapsed_ms(total_start))
+            log_trace(logger, "rag_answer_done", trace_id=trace_id, documents=0, elapsed_ms=elapsed_ms(total_start))
             return RagResponse(answer="知识库中没有明确依据。", sources=[])
 
-        answer = self.generate_answer(query, documents)
+        answer = self.generate_answer(query, documents, trace_id=trace_id)
         sources = self.sources(documents)
         log_trace(
             logger,
             "rag_answer_done",
+            trace_id=trace_id,
             documents=len(documents),
             sources_count=len(sources),
             answer_chars=len(answer or ""),
